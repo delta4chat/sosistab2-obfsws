@@ -12,9 +12,11 @@ async-std = "1.12.0"
 async-trait = "0.1.77"
 async-tungstenite = { version="0.24.0", features=["async-std-runtime", "async-native-tls"] }
 bytes = "1.5.0"
+env_logger = "0.10.1"
 futures-util = "0.3.30"
 log = "0.4.20"
 smol = "2.0.0"
+smol-timeout = "0.6.0"
 smolscale = "0.4.2"
 sosistab2 = "0.10.19"
 

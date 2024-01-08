@@ -38,7 +38,7 @@ impl ObfsWebsocketPipe {
         //let inner = async_dup::Mutex::new(inner);
         //let inner = async_dup::Arc::new(inner);
     
-        let (inner_send_tx, inner_send_rx) = smol::channel::bounded(1000);
+        let (inner_send_tx, inner_send_rx) = smol::channel::unbounded();
         let (inner_writer, inner_reader) = inner.split();
         Self {
             //inner: inner.clone(),
@@ -56,10 +56,10 @@ async fn send_loop(
     mut inner_writer: SplitSink<WS, ws::Message>,
 ) -> anyhow::Result<()> {
     loop {
-        let msg: Bytes = inner_send_rx.recv().await?;
+        let msg: Bytes = inner_send_rx.recv().await.unwrap();
         log::trace!("ws(plain) sending new message: {:?}", &msg);
 
-        inner_writer.send( ws::Message::binary(msg) ).await?;
+        inner_writer.send( ws::Message::binary(msg) ).await.unwrap();
     }
 }
 
@@ -69,7 +69,11 @@ impl sosistab2::Pipe for ObfsWebsocketPipe {
         let msg_len = msg.len();
         if msg_len < 65536 {
             let ret = self.inner_send_tx.try_send(msg);
-            log::trace!("trying send {} bytes via ws: {:?}", msg_len, ret);
+            if ret.is_ok() {
+                log::trace!("sent {} bytes via ws: {:?}", msg_len, ret);
+            } else {
+                log::warn!("unable to send {} bytes via ws: maybe `smol::channel::bounded` reach max size (1000) ? Error= {:?}", msg_len, ret);
+            }
         } else {
             log::warn!("Websocket Message too big (len={})", msg_len);
         }
