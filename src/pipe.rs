@@ -85,7 +85,7 @@ impl sosistab2::Pipe for ObfsWebsocketPipe {
             if let Ok(ret) = ret {
                 match ret {
                     ws::Message::Binary(msg) => {
-                        log::trace!("from ws stream recved {msg:?}");
+                        log::trace!("from ws stream recved (before 256 bytes) {:?}", if msg.len() < 256 { &msg } else { &msg[..256] });
                         return Ok(msg.into());
                     },
 

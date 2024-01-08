@@ -49,7 +49,7 @@ async fn obfsws_test_1() {
         conn.wait_connected().await.unwrap();
         println!("client relconn established");
 
-        let msg = b"TESTMESSAGE".repeat(50000);
+        let msg = b"TEST MESSAGE".repeat(50000);
         let msg_len = msg.len();
 
         let mut conn2 = conn.clone();
@@ -60,11 +60,11 @@ async fn obfsws_test_1() {
             let mut recv_bytes = 0u128;
             let start_time = Instant::now();
             let mut time_anchor = start_time;
-            let interval = Duration::from_secs(1);
+            let interval = Duration::from_secs(2);
 
             let mut recv_buf = b".".repeat(msg_len*2);
 
-
+            let b = (1.0, "byte");
             let kb = (1024.0, "KiB");
             let mb = (kb.0*1024.0, "MiB");
             let gb = (mb.0*1024.0, "GiB");
@@ -73,17 +73,35 @@ async fn obfsws_test_1() {
             let mut total_speed;
             let mut speed;
 
+            let mut ticks = 0u128;
+            let mut recvs = 0u128;
             loop {
+                ticks += 1; // add for each iteration
+
                 if time_anchor.elapsed() >= interval {
                     total_speed = (total_recv_bytes as f64) / unit.0 / start_time.elapsed().as_secs_f64();
                     speed = (recv_bytes as f64) / unit.0 / time_anchor.elapsed().as_secs_f64();
                     {
                         let unit = unit.1;
-                        println!("Download speed: slice begin = {total_speed} {unit}/s   | slice last epoch = {speed} {unit}/s");
+                        let rate = if recvs > 0 {
+                            let ticks = ticks as f64;
+                            let recvs = recvs as f64;
+                            100.0/(ticks/recvs)
+                        } else {
+                            0.0
+                        };
+
+                        println!("NO.{ticks}: Ok({rate:.2}%) Download speed: slice begin = {total_speed:.3} {unit}/s | slice last epoch = {speed:.3} {unit}/s");
+
+                        if rate < 90.0 {
+                            log::error!("Ok rate too low");
+                            break;
+                        }
                     }
 
                     if speed > 2000.0 {
                         unit = match unit {
+                            (_, "byte") => kb,
                             (_, "KiB") => mb,
                             (_, "MiB") => gb,
                             (_, "GiB") => gb,
@@ -91,7 +109,8 @@ async fn obfsws_test_1() {
                         };
                     } else if speed < 1.0 {
                         unit = match unit {
-                            (_, "KiB") => kb,
+                            (_, "byte") => b,
+                            (_, "KiB") => b,
                             (_, "MiB") => kb,
                             (_, "GiB") => mb,
                             _ => { panic!("impossible") }
@@ -103,10 +122,14 @@ async fn obfsws_test_1() {
                 }
 
                 if let Some(ret) = conn2.read(&mut recv_buf).timeout(interval).await {
+                    recvs += 1; // add on recv only
+
                     let size = ret.unwrap();
                     recv_bytes += (size as u128);
                     total_recv_bytes += (size as u128);
                     allow_send_notify.try_send(());
+                } else {
+                    log::warn!("Read relconn timed out");
                 }
             }
         };
@@ -114,8 +137,8 @@ async fn obfsws_test_1() {
             //let mut t;
             loop {
                 //t = Instant::now();
-                conn.write(&msg).await.unwrap();
-                //allow_send.recv().await;
+                conn.write_all(&msg).await.unwrap();
+                allow_send.recv().await;
                 //println!("{:?}", t.elapsed());
             }
         };
