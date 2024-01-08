@@ -42,7 +42,6 @@ async fn pipe_accept_loop(
 
         let pipe_tx = pipe_tx.clone();
         smolscale::spawn(async move {
-
             let ws_conn = ws::accept_async(ws::ConnectStream::Plain(conn)).await.unwrap();
             let pipe = ObfsWebsocketPipe::new(ws_conn, &format!("client({})", addr));
             pipe_tx.send(pipe).await.unwrap();

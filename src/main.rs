@@ -15,7 +15,7 @@ async fn obfsws_test_1() {
 
             let c = server_mux.accept_conn().await;
             println!("server accept new relconn");
-            c
+            break c;
         }
     };
 

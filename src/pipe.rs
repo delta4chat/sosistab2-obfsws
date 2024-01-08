@@ -34,7 +34,7 @@ impl ObfsWebsocketPipe {
         Ok(this)
     }
 
-    pub(crate) fn new(inner: ws::WS, peer_metadata: &str) -> Self {
+    pub(crate) fn new(inner: WS, peer_metadata: &str) -> Self {
         //let inner = async_dup::Mutex::new(inner);
         //let inner = async_dup::Arc::new(inner);
     
@@ -68,9 +68,10 @@ impl sosistab2::Pipe for ObfsWebsocketPipe {
     fn send(&self, msg: Bytes) {
         let msg_len = msg.len();
         if msg_len < 65536 {
-            log::trace!("trying send {} bytes via ws: {:?}", msg_len, self.inner_send_tx.try_send(msg));
+            let ret = self.inner_send_tx.try_send(msg);
+            log::trace!("trying send {} bytes via ws: {:?}", msg_len, ret);
         } else {
-            log::error!("Websocket Message too big (len={})", msg_len);
+            log::warn!("Websocket Message too big (len={})", msg_len);
         }
     }
 
@@ -80,6 +81,7 @@ impl sosistab2::Pipe for ObfsWebsocketPipe {
             if let Ok(ret) = ret {
                 match ret {
                     ws::Message::Binary(msg) => {
+                        log::trace!("from ws stream recved {msg:?}");
                         return Ok(msg.into());
                     },
 
