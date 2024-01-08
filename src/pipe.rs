@@ -13,6 +13,7 @@ use smol::channel::{Sender, Receiver};
 use async_dup::{Arc, Mutex};
 
 //type Inner = async_dup::Arc<async_dup::Mutex<WS>>;
+#[derive(Debug)]
 pub struct ObfsWebsocketPipe {
     //inner: Inner,
     inner_reader: Arc<Mutex<SplitStream<WS>>>,

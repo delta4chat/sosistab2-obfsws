@@ -7,6 +7,7 @@ use async_std::net::{TcpStream, TcpListener};
 use async_trait::async_trait;
 
 use std::net::SocketAddr;
+use async_std::net::ToSocketAddrs;
 use std::sync::Arc;
 
 use sosistab2::{Pipe, PipeListener};
@@ -16,7 +17,12 @@ pub struct ObfsWebsocketListener {
     _task: Task<anyhow::Result<()>>
 }
 impl ObfsWebsocketListener {
-    pub async fn bind(socket: TcpListener) -> Self {
+    pub async fn bind(addr: impl ToSocketAddrs) -> anyhow::Result<Self> {
+        let sock = TcpListener::bind(addr).await?;
+        Ok(Self::from(sock))
+    }
+
+    pub fn from(socket: TcpListener) -> Self {
         let (pipe_tx, pipe_rx) = smol::channel::bounded(1000);
         Self {
             pipe_rx,
