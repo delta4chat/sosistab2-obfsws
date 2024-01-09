@@ -7,6 +7,7 @@ use sosistab2_obfsws::{ObfsWsPipe, ObfsWsListener};
 
 // types
 use std::net::{SocketAddr, Ipv4Addr, Ipv6Addr};
+use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
 use sosistab2::{MuxSecret, MuxPublic};
 
@@ -26,7 +27,7 @@ use socksv5::v4::{SocksV4Request, SocksV4Host};
 use socksv5::v5::{SocksV5Request, SocksV5Host, SocksV5AuthMethod};
 
 // time
-use std::time::Duration;
+use std::time::{Duration, SystemTime, Instant};
 
 // command line parse
 use clap::Parser;
@@ -59,6 +60,9 @@ struct ServerOpt {
     #[arg(long, default_value="[::]:2038")]
     listen: SocketAddr,
 
+    #[arg(long, default_value=".wsocks-server-secret-key")]
+    key_file: String,
+
     #[arg(long)]
     http_path: Option<String>,
 }
@@ -78,14 +82,12 @@ fn hex2key(h: &str) -> anyhow::Result<[u8; 32]> {
 
 #[derive(Debug, Serialize, Deserialize)]
 enum NetworkError {
-        ServerFailure,
-        ConnectionNotAllowed,
-        NetworkUnreachable,
-        HostUnreachable,
-        ConnectionRefused,
-        TtlExpired,
-        CommandNotSupported,
-        AddrtypeNotSupported,
+    ServerFailure,
+    ConnectionNotAllowed,
+    NetworkUnreachable,
+    HostUnreachable,
+    ConnectionRefused,
+    TtlExpired,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -129,6 +131,43 @@ enum Protocol {
     TcpOffer {
         id: Result<u128, OfferError>,
     },
+
+    /*
+    TcpBind {}
+    UDPAssociate {}
+    */
+}
+
+#[derive(Debug)]
+struct Etag {
+    id: u128,
+    time: SystemTime,
+    pk: MuxPublic,
+}
+
+impl Etag {
+    fn new(pk: MuxPublic) -> Self {
+        Self {
+            id: fastrand::u128(..),
+            time: SystemTime::now(),
+            pk,
+        }
+    }
+}
+
+const NS_WSOCKS_CLIENT: &[u8; 32] = b"\xb2\xdf\xa0\x91\xde\xc2\x07\xbf\xce\x9e\x9f\x82\xb4\xf6\x85\x16\xe2\xb6\xae\xf8\xab\xa4\xa0\x90\x96\xd3\xf8\xfe\x02\xcb\xc5\xa8";
+
+impl ToString for Etag {
+    fn to_string(&self) -> String {
+        let a= format!("{:?}", self);
+        let a = blake3::keyed_hash(NS_WSOCKS_CLIENT, a.as_bytes());
+        let a = base64::encode(a.as_bytes());
+        let mut b = String::new();
+        b.push('"');
+        b.push_str(&a);
+        b.push('"');
+        b
+    }
 }
 
 async fn client(copt: ClientOpt) -> anyhow::Result<()> {
@@ -136,9 +175,11 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
         hex2key(&copt.remote_pubkey).expect("[hex::decode] cannot parse remote public key")
     );
 
+    let etag = Etag::new(pubkey).to_string();
+
     let max_conn = copt.remote_max_websockets as usize;
 
-    let mux = Arc::new(Mutex::new(Multiplex::new(MuxSecret::generate(), Some(pubkey))));
+    let mux = Arc::new(Multiplex::new(MuxSecret::generate(), Some(pubkey)));
 
     let pipemgr_fut = {
         let url = copt.remote_url.clone();
@@ -147,22 +188,22 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
             let mut pipe: ObfsWsPipe;
             loop {
                 // remove any closed ws pipe
-                mux.lock().await.retain(|p| { p.peer_addr().len() > 0 });
+                mux.retain(|p| { p.peer_addr().len() > 0 });
 
-                if mux.lock().await.iter_pipes().collect::<Vec<_>>().len() > max_conn {
+                if mux.iter_pipes().collect::<Vec<_>>().len() > max_conn {
                     smol::Timer::after(Duration::from_secs(1)).await;
                     continue;
                 }
 
-                pipe = match ObfsWsPipe::connect(&url, "").await {
+                pipe = match ObfsWsPipe::connect(&url, &etag).await {
                     Ok(v) => v,
                     Err(err) => {
                         log::error!("Unable connect to wsocks server: cannot establish websocket conn (URL={:?}): {:?}", &url, err);
-                        smol::Timer::after(Duration::from_secs(10)).await;
+                        smol::Timer::after(Duration::from_secs(3)).await;
                         continue;
                     }
                 };
-                mux.lock().await.add_pipe(pipe);
+                mux.add_pipe(pipe);
             }
 
             anyhow::Ok(())
@@ -180,7 +221,7 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
                     let req = bincode::serialize(&req).unwrap();
                     let req_len: [u8; 2] = (req.len() as u16).to_be_bytes(); // convert to big-endian
 
-                    let mut relconn = mux.lock().await.open_conn("").await.unwrap();
+                    let mut relconn = mux.open_conn("").await.unwrap();
 
                     // send req
                     relconn.write(&req_len).await.unwrap();
@@ -271,13 +312,59 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
         }
     };
 
-    mux.lock().await.add_drop_friend(smolscale::spawn(socks_fut));
-    mux.lock().await.add_drop_friend(smolscale::spawn(request_fut));
+    mux.add_drop_friend(smolscale::spawn(socks_fut));
+    mux.add_drop_friend(smolscale::spawn(request_fut));
 
     pipemgr_fut.await
 }
 
 async fn server(sopt: ServerOpt) -> anyhow::Result<()> {
+    let key_file = sopt.key_file.clone();
+    let listen = sopt.listen.clone();
+    let mut mux: HashMap<String, Arc<Multiplex>> = HashMap::new();
+
+    let mut i = 0;
+    let sk: MuxSecret = loop {
+        // this is important for avoid infinity loop
+        i += 1;
+        if i >= 10 {
+            panic!("Cannot get long-term secret key of server!");
+        }
+
+        match smol::fs::read(&key_file).await {
+            Ok(data) => {
+                if data.len() == 32 {
+                    let mut key = [0u8; 32];
+                    for i in 0..32 {
+                        key[i] = data[i];
+                    }
+                    break MuxSecret::from_bytes(key);
+                }
+
+                anyhow::bail!("Key file {key_file:?} is corrupted! your server's long-term secret key probably lost. please check.");
+            }
+            Err(err) => {
+                log::warn!("Cannot read your key file {key_file:?} (Error={err:?})... so generate new secret key, then save it into disk.");
+                let sk = MuxSecret::generate();
+                smol::fs::write(&key_file, sk.to_bytes()).await.expect("Cannot write new key to disk!?");
+            }
+        }
+    };
+
+    // ws pipe listener - future
+    let wpl_fut = {
+        let mux = mux.clone();
+
+        // ws pipe listener
+        let wpl = ObfsWsListener::bind(listen).await?;
+
+        async move {
+            loop {
+                let pipe: Arc<dyn Pipe> = wpl.accept_pipe().await.unwrap();
+            }
+        }
+    };
+
     todo!()
 }
 

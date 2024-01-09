@@ -37,15 +37,29 @@ async fn pipe_accept_loop(
 ) -> anyhow::Result<()> {
     let mut conn: TcpStream;
     let mut addr: SocketAddr;
+
     loop {
         (conn, addr) = socket.accept().await?;
 
         let pipe_tx = pipe_tx.clone();
         smolscale::spawn(async move {
-            let ws_conn = ws::accept_async(ws::ConnectStream::Plain(conn)).await.unwrap();
-            let pipe = ObfsWsPipe::new(ws_conn, &format!("client({})", addr));
+            let (md_tx, md_rx) = smol::channel::bounded(1);
+
+            let ws_conn = ws::accept_hdr_async(ws::ConnectStream::Plain(conn), pipe_get_metadata(md_tx)).await.unwrap();
+            let metadata = md_rx.recv().await.unwrap();
+            let pipe = ObfsWsPipe::new(ws_conn, &metadata);
             pipe_tx.send(pipe).await.unwrap();
         }).detach();
+    }
+}
+
+fn pipe_get_metadata(md_tx: Sender<String>) -> impl ws::Callback {
+    move |req: &ws::Request, res: ws::Response| {
+        if let Some(etag) = req.headers().get("If-Match") {
+            md_tx.try_send(etag.to_str().unwrap().to_string()).unwrap();
+        }
+
+        Ok(res)
     }
 }
 

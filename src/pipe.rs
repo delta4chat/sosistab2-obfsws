@@ -31,7 +31,14 @@ pub struct ObfsWsPipe {
 
 impl ObfsWsPipe {
     pub async fn connect(peer_url: &str, peer_metadata: &str) -> anyhow::Result<Self> {
-        let (inner, _) = ws::connect(peer_url).await?;
+        let req =
+            ws::Request::builder()
+            .method("GET")
+            .uri(peer_url)
+            .header("If-Match", peer_metadata)
+            .body(())
+            .unwrap();
+        let (inner, resp) = ws::connect_async(req).await?;
         let mut this = Self::new(inner, peer_metadata);
         this.peer_url = Some(peer_url.to_string());
         Ok(this)
