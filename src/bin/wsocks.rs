@@ -6,12 +6,13 @@ use sosistab2::{Pipe, PipeListener};
 use sosistab2_obfsws::{ObfsWsPipe, ObfsWsListener};
 
 // types
+use std::net::{SocketAddr, Ipv4Addr, Ipv6Addr};
 use serde::{Serialize, Deserialize};
 use sosistab2::{MuxSecret, MuxPublic};
-use std::net::SocketAddr;
 
 // concurrent lock
-use async_dup::{Arc, Mutex};
+use async_std::sync::Arc;
+use async_lock::Mutex;
 
 // async TCP socket
 use async_std::net::{TcpStream, TcpListener};
@@ -19,7 +20,7 @@ use async_std::net::{TcpStream, TcpListener};
 // socks protocol implemention
 use socksv5::SocksVersion;
 use socksv5::v4::{SocksV4Request, SocksV4Host};
-use socksv5::v5::{SocksV5Request, SocksV5AuthMethod};
+use socksv5::v5::{SocksV5Request, SocksV5Host, SocksV5AuthMethod};
 
 // time
 use std::time::Duration;
@@ -72,26 +73,55 @@ fn hex2key(h: &str) -> anyhow::Result<[u8; 32]> {
     Ok(k)
 }
 
+enum NetworkError {
+        ServerFailure,
+        ConnectionNotAllowed,
+        NetworkUnreachable,
+        HostUnreachable,
+        ConnectionRefused,
+        TtlExpired,
+        CommandNotSupported,
+        AddrtypeNotSupported,
+}
+
+enum SessionError {
+    SessionUnknown, // client sends TcpResume or TcpClose, but conn ID is not found.
+    SessionTimeout, // conn ID exists, but inactive a long time, so reachs the server timeout.
+    BrokenPipe, // proxied connection is closed by peer 
+}
+
+
 #[derive(Debug, Serialize, Deserialize)]
 enum OfferError {
-    ServerFailure,
-    ConnectionNotAllowed,
-    NetworkUnreachable,
-    HostUnreachable,
-    ConnectionRefused,
-    TtlExpired,
-    CommandNotSupported,
-    AddrtypeNotSupported,
+    NetworkError,
+    SessionError,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 enum Protocol {
+    // this frame is for hide metadata of packet length, so it's content is complete junk and can be safety ignored
+    Padding {
+        junk: Vec<u8>,
+    },
+
+    // client wants to open a new TCP connection
     TcpConnect {
         dst: String, // can be IP address or Domain name
         port: u16, // 0-65535
-        id: Option<u128>,
     },
-    Offer {
+
+    // client wants to "re-use" a exists TCP Connection
+    TcpResume {
+        id: u128,
+    },
+
+    // client wants to close a exists TCP connection
+    TcpClose {
+        id: u128,
+    },
+
+    // server offers the client request (one of TcpConnect, TcpResume, TcpClose).
+    TcpOffer {
         id: Result<u128, OfferError>,
     },
 }
@@ -108,18 +138,23 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
     let pipemgr_fut = {
         let mux = mux.clone();
         async move {
-            let mut pipes: Vec<ObfsWsPipe>;
             let mut pipe: ObfsWsPipe;
             loop {
-                if pipes.len() > max_conn {
+                let mux = mux.lock().await;
+
+                // remove any closed ws pipe
+                mux.retain(|p| { p.peer_addr().len() > 0 });
+
+                if mux.iter_pipes().collect::<Vec<_>>().len() > max_conn {
+                    std::mem::drop(mux);
                     smol::Timer::after(Duration::from_secs(5)).await;
                     continue;
                 }
 
                 pipe = ObfsWsPipe::connect(&copt.remote_url, "").await?;
-                pipes.push(pipe.clone());
- 
-                mux.lock().add_pipe(pipe);
+                mux.add_pipe(pipe);
+
+                std::mem::drop(mux);
             }
 
             anyhow::Ok(())
@@ -127,16 +162,14 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
     };
 
     let (req_tx, req_rx) = smol::channel::unbounded();
-    async fn handle_request(dst: String, port: u16) {
-        mux.open_conn
-    }
-
-    let request_fut = async {
+    let request_fut = async move {
         loop {
-            let req = req_rx.recv().await.unwrap();
+            let (req, conn) = req_rx.recv().await.unwrap();
             println!("{:?}", req);
+            println!("{:?}", conn);
         }
     };
+
     let socks_fut = {
         let req_tx = req_tx.clone();
         let socks = TcpListener::bind(copt.local_socks_listen).await?;
@@ -155,11 +188,11 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
                             port = req.port;
 
                             dst = match req.host {
-                                SocksV4Host::Ip(ip) => {
-                                    format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3])
+                                SocksV4Host::Ip(ip4) => {
+                                    Ipv4Addr::from(ip4).to_string()
                                 }
-                                SocksV4Host::Domain(n) => {
-                                    String::from_utf8_lossy(&n).to_string()
+                                SocksV4Host::Domain(name) => {
+                                    String::from_utf8_lossy(&name).to_string()
                                 }
                             };
                         }
@@ -169,21 +202,36 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
 
                             let req = socksv5::v5::read_request(&conn).await.unwrap();
                             port = req.port;
+
+                            dst = match req.host {
+                                SocksV5Host::Ipv4(ip4) => {
+                                    Ipv4Addr::from(ip4).to_string()
+                                }
+                                SocksV5Host::Ipv6(ip6) => {
+                                    Ipv6Addr::from(ip6).to_string()
+                                }
+                                SocksV5Host::Domain(name) => {
+                                    String::from_utf8_lossy(&name).to_string()
+                                }
+                            }
                         }
                     }
 
                     let req = Protocol::TcpConnect {
                         dst,
                         port,
-                        id: None,
                     };
-                    req_tx.send(req).await.unwrap();
+
+                    req_tx.send((req, conn)).await.unwrap();
                 }).detach();
             }
         }
     };
 
-    todo!()
+    mux.lock().await.add_drop_friend(smolscale::spawn(socks_fut));
+    mux.lock().await.add_drop_friend(smolscale::spawn(request_fut));
+
+    pipemgr_fut.await
 }
 
 async fn server(sopt: ServerOpt) -> anyhow::Result<()> {

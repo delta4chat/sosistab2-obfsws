@@ -12,7 +12,8 @@ use ws::WS;
 
 use smol::channel::{Sender, Receiver};
 
-use async_dup::{Arc, Mutex};
+use async_std::sync::Arc;
+use async_lock::Mutex;
 
 //type Inner = async_dup::Arc<async_dup::Mutex<WS>>;
 #[derive(Debug, Clone)]
@@ -89,7 +90,7 @@ async fn send_loop(
 #[async_trait]
 impl sosistab2::Pipe for ObfsWsPipe {
     fn send(&self, msg: Bytes) {
-        if self.closed.load(Relaxed) {
+        if self.is_closed() {
             std::io::Result::<()>::Err(std::io::ErrorKind::BrokenPipe.into()).expect("Try send to a closed ObfsWsPipe!");
         }
 
@@ -107,7 +108,7 @@ impl sosistab2::Pipe for ObfsWsPipe {
     }
 
     async fn recv(&self) -> std::io::Result<Bytes> {
-        let ret = self.inner_reader.lock().next().await;
+        let ret = self.inner_reader.lock().await.next().await;
         if let Some(ret) = ret {
             if let Ok(ret) = ret {
                 match ret {
@@ -132,11 +133,19 @@ impl sosistab2::Pipe for ObfsWsPipe {
     }
 
     fn peer_addr(&self) -> String {
-        if let Some(url) = &self.peer_url {
-            url.clone()
-        } else {
-            self.peer_metadata.to_string()
+        let mut s = "=".to_string();
+        if self.is_closed() {
+            s.clear();
+            return s;
         }
+
+        if let Some(url) = &self.peer_url {
+            s.push_str(&url);
+        } else {
+            s.push_str(&self.peer_metadata);
+        }
+
+        s
     }
 
     fn peer_metadata(&self) -> &str {

@@ -7,13 +7,14 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.79"
-async-dup = "1.2.4"
+async-lock = "3.2.0"
 async-std = "1.12.0"
 async-trait = "0.1.77"
 async-tungstenite = { version="0.24.0", features=["async-std-runtime", "async-native-tls"] }
 bytes = "1.5.0"
 clap = { version = "4.4.13", features = ["derive"] }
 env_logger = "0.10.1"
+fastrand = "2.0.1"
 futures-util = "0.3.30"
 hex = { version = "0.4.3", features = ["serde"] }
 log = "0.4.20"
