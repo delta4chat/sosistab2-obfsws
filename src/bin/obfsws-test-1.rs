@@ -10,7 +10,7 @@ async fn obfsws_test_1() {
     let server_fut = async {
         println!("create server");
         let server_mux = sosistab2::Multiplex::new(MuxSecret::generate(), None);
-        let server_pipe = listener::ObfsWebsocketListener::bind("127.0.0.1:7070").await.unwrap();
+        let server_pipe = listener::ObfsWsListener::bind("127.0.0.1:7070").await.unwrap();
         loop{
             let p = server_pipe.accept_pipe().await.unwrap();
             println!("accepted new incoming obfsws conn! {:?}", p.peer_addr());
@@ -36,7 +36,7 @@ async fn obfsws_test_1() {
         smol::Timer::after(Duration::from_secs(1)).await;
 
         println!("create client");
-        let client_pipe = pipe::ObfsWebsocketPipe::connect("ws://127.0.0.1:7070/abdgi", "metadata").await.unwrap();
+        let client_pipe = pipe::ObfsWsPipe::connect("ws://127.0.0.1:7070/abdgi", "metadata").await.unwrap();
         println!("{:?}", &client_pipe);
 
 

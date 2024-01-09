@@ -1,6 +1,9 @@
 pub mod pipe;
 pub mod listener;
 
+pub use pipe::ObfsWsPipe;
+pub use listener::ObfsWsListener;
+
 pub mod ws {
     pub use async_tungstenite::{accept_async, WebSocketStream};
     pub use async_tungstenite::async_std::{
@@ -14,5 +17,5 @@ pub mod ws {
 
 }
 
-use sosistab2::{Pipe, PipeListener};
+pub use sosistab2::{Pipe, PipeListener};
 

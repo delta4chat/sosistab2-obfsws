@@ -1,4 +1,6 @@
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+
 use bytes::Bytes;
 
 use async_trait::async_trait;
@@ -14,11 +16,13 @@ use async_dup::{Arc, Mutex};
 
 //type Inner = async_dup::Arc<async_dup::Mutex<WS>>;
 #[derive(Debug)]
-pub struct ObfsWebsocketPipe {
+pub struct ObfsWsPipe {
     //inner: Inner,
     inner_reader: Arc<Mutex<SplitStream<WS>>>,
     //inner_writer: SplitSink<WS, ws::Message>,
     inner_send_tx: Sender<Bytes>,
+
+    closed: Arc<AtomicBool>,
 
     peer_url: Option<String>,
     peer_metadata: String,
@@ -26,7 +30,7 @@ pub struct ObfsWebsocketPipe {
     _task: smol::Task<anyhow::Result<()>>,
 }
 
-impl ObfsWebsocketPipe {
+impl ObfsWsPipe {
     pub async fn connect(peer_url: &str, peer_metadata: &str) -> anyhow::Result<Self> {
         let (inner, _) = ws::connect(peer_url).await?;
         let mut this = Self::new(inner, peer_metadata);
@@ -40,32 +44,48 @@ impl ObfsWebsocketPipe {
     
         let (inner_send_tx, inner_send_rx) = smol::channel::unbounded();
         let (inner_writer, inner_reader) = inner.split();
+        let closed = Arc::new(AtomicBool::new(false));
         Self {
+            closed: closed.clone(),
+
             //inner: inner.clone(),
             inner_reader: Arc::new(Mutex::new(inner_reader)),
             //inner_writer,
             inner_send_tx,
             peer_url: None,
             peer_metadata: peer_metadata.to_string(),
-            _task: smolscale::spawn(send_loop(inner_send_rx, inner_writer)),
+            _task: smolscale::spawn(send_loop(inner_send_rx, inner_writer, closed)),
         }
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Relaxed)
     }
 }
 async fn send_loop(
     inner_send_rx: Receiver<Bytes>,
     mut inner_writer: SplitSink<WS, ws::Message>,
+    closed: Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
     loop {
         let msg: Bytes = inner_send_rx.recv().await.unwrap();
         log::trace!("ws(plain) sending new message: {:?}", &msg);
 
-        inner_writer.send( ws::Message::binary(msg) ).await.unwrap();
+        let result = inner_writer.send( ws::Message::binary(msg) ).await;
+        if result.is_err() {
+            closed.store(true, Relaxed);
+        }
+        result.unwrap();
     }
 }
 
 #[async_trait]
-impl sosistab2::Pipe for ObfsWebsocketPipe {
+impl sosistab2::Pipe for ObfsWsPipe {
     fn send(&self, msg: Bytes) {
+        if self.closed.load(Relaxed) {
+            std::io::Result::<()>::Err(std::io::ErrorKind::BrokenPipe.into()).expect("Try send to a closed ObfsWsPipe!");
+        }
+
         let msg_len = msg.len();
         if msg_len < 65536 {
             let ret = self.inner_send_tx.try_send(msg);
@@ -95,6 +115,8 @@ impl sosistab2::Pipe for ObfsWebsocketPipe {
                 }
             }
         }
+
+        self.closed.store(true, Relaxed);
         Err(std::io::ErrorKind::BrokenPipe.into())
     }
 

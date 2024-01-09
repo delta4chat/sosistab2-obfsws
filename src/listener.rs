@@ -1,5 +1,5 @@
 use crate::ws;
-use crate::pipe::ObfsWebsocketPipe;
+use crate::pipe::ObfsWsPipe;
 
 use smol::Task;
 use smol::channel::{Sender, Receiver};
@@ -12,11 +12,11 @@ use std::sync::Arc;
 
 use sosistab2::{Pipe, PipeListener};
 
-pub struct ObfsWebsocketListener {
-    pipe_rx: Receiver<ObfsWebsocketPipe>,
+pub struct ObfsWsListener {
+    pipe_rx: Receiver<ObfsWsPipe>,
     _task: Task<anyhow::Result<()>>
 }
-impl ObfsWebsocketListener {
+impl ObfsWsListener {
     pub async fn bind(addr: impl ToSocketAddrs) -> anyhow::Result<Self> {
         let sock = TcpListener::bind(addr).await?;
         Ok(Self::from(sock))
@@ -32,7 +32,7 @@ impl ObfsWebsocketListener {
 }
 
 async fn pipe_accept_loop(
-    pipe_tx: Sender<ObfsWebsocketPipe>,
+    pipe_tx: Sender<ObfsWsPipe>,
     socket: TcpListener
 ) -> anyhow::Result<()> {
     let mut conn: TcpStream;
@@ -43,14 +43,14 @@ async fn pipe_accept_loop(
         let pipe_tx = pipe_tx.clone();
         smolscale::spawn(async move {
             let ws_conn = ws::accept_async(ws::ConnectStream::Plain(conn)).await.unwrap();
-            let pipe = ObfsWebsocketPipe::new(ws_conn, &format!("client({})", addr));
+            let pipe = ObfsWsPipe::new(ws_conn, &format!("client({})", addr));
             pipe_tx.send(pipe).await.unwrap();
         }).detach();
     }
 }
 
 #[async_trait]
-impl PipeListener for ObfsWebsocketListener {
+impl PipeListener for ObfsWsListener {
     async fn accept_pipe(&self) -> std::io::Result<Arc<dyn Pipe>> {
         Ok(Arc::new(self.pipe_rx.recv().await.map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::BrokenPipe, e)
