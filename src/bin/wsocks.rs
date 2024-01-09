@@ -21,6 +21,9 @@ use socksv5::SocksVersion;
 use socksv5::v4::{SocksV4Request, SocksV4Host};
 use socksv5::v5::{SocksV5Request, SocksV5AuthMethod};
 
+// time
+use std::time::Duration;
+
 // command line parse
 use clap::Parser;
 
@@ -30,9 +33,14 @@ struct ClientOpt {
     #[arg(long)]
     /// URL of wsocks server. e.g. ws://example.com/DestroyGFW
     remote_url: String,
+
     #[arg(long)]
     /// a public key of wsocks server, encoded by hex format, usually 32 bytes (provides 256-bit security)
     remote_pubkey: String,
+
+    #[arg(long, default_value="10")]
+    /// the max limit of opened websocket connection
+    remote_max_websockets: u8,
 
     // client-side proxy tunnels
     #[arg(long, default_value="127.0.0.1:1989")]
@@ -93,17 +101,28 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
         hex2key(&copt.remote_pubkey).expect("[hex::decode] cannot parse remote public key")
     );
 
+    let max_conn = copt.remote_max_websockets as usize;
+
     let mux = Arc::new(Mutex::new(Multiplex::new(MuxSecret::generate(), Some(pubkey))));
 
     let pipemgr_fut = {
         let mux = mux.clone();
         async move {
+            let mut pipes: Vec<ObfsWsPipe>;
             let mut pipe: ObfsWsPipe;
             loop {
+                if pipes.len() > max_conn {
+                    smol::Timer::after(Duration::from_secs(5)).await;
+                    continue;
+                }
+
                 pipe = ObfsWsPipe::connect(&copt.remote_url, "").await?;
+                pipes.push(pipe.clone());
  
                 mux.lock().add_pipe(pipe);
             }
+
+            anyhow::Ok(())
         }
     };
 

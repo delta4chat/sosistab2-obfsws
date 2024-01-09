@@ -15,7 +15,7 @@ use smol::channel::{Sender, Receiver};
 use async_dup::{Arc, Mutex};
 
 //type Inner = async_dup::Arc<async_dup::Mutex<WS>>;
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ObfsWsPipe {
     //inner: Inner,
     inner_reader: Arc<Mutex<SplitStream<WS>>>,
@@ -26,8 +26,6 @@ pub struct ObfsWsPipe {
 
     peer_url: Option<String>,
     peer_metadata: String,
-
-    _task: smol::Task<anyhow::Result<()>>,
 }
 
 impl ObfsWsPipe {
@@ -45,8 +43,18 @@ impl ObfsWsPipe {
         let (inner_send_tx, inner_send_rx) = smol::channel::unbounded();
         let (inner_writer, inner_reader) = inner.split();
         let closed = Arc::new(AtomicBool::new(false));
+
+        // background task for sending pkts
+        smolscale::spawn(
+            send_loop(
+                inner_send_rx,
+                inner_writer,
+                closed.clone()
+            )
+        ).detach();
+
         Self {
-            closed: closed.clone(),
+            closed,
 
             //inner: inner.clone(),
             inner_reader: Arc::new(Mutex::new(inner_reader)),
@@ -54,7 +62,6 @@ impl ObfsWsPipe {
             inner_send_tx,
             peer_url: None,
             peer_metadata: peer_metadata.to_string(),
-            _task: smolscale::spawn(send_loop(inner_send_rx, inner_writer, closed)),
         }
     }
 
