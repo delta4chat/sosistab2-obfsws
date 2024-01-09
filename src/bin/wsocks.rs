@@ -159,14 +159,11 @@ const NS_WSOCKS_CLIENT: &[u8; 32] = b"\xb2\xdf\xa0\x91\xde\xc2\x07\xbf\xce\x9e\x
 
 impl ToString for Etag {
     fn to_string(&self) -> String {
-        let a= format!("{:?}", self);
-        let a = blake3::keyed_hash(NS_WSOCKS_CLIENT, a.as_bytes());
-        let a = base64::encode(a.as_bytes());
-        let mut b = String::new();
-        b.push('"');
-        b.push_str(&a);
-        b.push('"');
-        b
+        let out = format!("{:?}", self);
+        let out = blake3::keyed_hash(NS_WSOCKS_CLIENT, out.as_bytes());
+        let out = &out.as_bytes()[0..16];
+        let out = base64::encode(out);
+        out
     }
 }
 

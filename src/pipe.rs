@@ -31,11 +31,21 @@ pub struct ObfsWsPipe {
 
 impl ObfsWsPipe {
     pub async fn connect(peer_url: &str, peer_metadata: &str) -> anyhow::Result<Self> {
+        let peer_url: ws::Uri = peer_url.parse()?;
+        let mut host = peer_url.host().unwrap().to_string();
+        if let Some(port) = peer_url.port_u16() {
+            host.push(':');
+            host.push_str(&port.to_string());
+        }
         let req =
             ws::Request::builder()
             .method("GET")
-            .uri(peer_url)
-            .header("If-Match", peer_metadata)
+            .uri(peer_url.clone())
+            .header("Host", host)
+            .header("Connection", "Upgrade")
+            .header("Upgrade", "websocket")
+            .header("Sec-Websocket-Version", "13")
+            .header("Sec-Websocket-Key", peer_metadata)
             .body(())
             .unwrap();
         let (inner, resp) = ws::connect_async(req).await?;

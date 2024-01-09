@@ -6,6 +6,7 @@ pub use listener::ObfsWsListener;
 
 pub mod ws {
     pub use async_tungstenite::{accept_hdr_async, WebSocketStream};
+    pub use async_tungstenite::tungstenite::http::Uri;
     pub use async_tungstenite::tungstenite::handshake::client::Request;
     pub use async_tungstenite::tungstenite::handshake::server::Response;
     pub use async_tungstenite::tungstenite::handshake::server::Callback;

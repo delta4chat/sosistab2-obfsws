@@ -55,10 +55,8 @@ async fn pipe_accept_loop(
 
 fn pipe_get_metadata(md_tx: Sender<String>) -> impl ws::Callback {
     move |req: &ws::Request, res: ws::Response| {
-        if let Some(etag) = req.headers().get("If-Match") {
-            md_tx.try_send(etag.to_str().unwrap().to_string()).unwrap();
-        }
-
+        let md = req.headers().get("Sec-Websocket-Key").unwrap();
+        md_tx.try_send(md.to_str().unwrap().to_string()).unwrap();
         Ok(res)
     }
 }
