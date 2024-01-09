@@ -10,6 +10,9 @@ use std::net::{SocketAddr, Ipv4Addr, Ipv6Addr};
 use serde::{Serialize, Deserialize};
 use sosistab2::{MuxSecret, MuxPublic};
 
+// traits
+use futures_util::{AsyncReadExt, AsyncWriteExt};
+
 // concurrent lock
 use async_std::sync::Arc;
 use async_lock::Mutex;
@@ -73,6 +76,7 @@ fn hex2key(h: &str) -> anyhow::Result<[u8; 32]> {
     Ok(k)
 }
 
+#[derive(Debug, Serialize, Deserialize)]
 enum NetworkError {
         ServerFailure,
         ConnectionNotAllowed,
@@ -84,6 +88,7 @@ enum NetworkError {
         AddrtypeNotSupported,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
 enum SessionError {
     SessionUnknown, // client sends TcpResume or TcpClose, but conn ID is not found.
     SessionTimeout, // conn ID exists, but inactive a long time, so reachs the server timeout.
@@ -93,8 +98,8 @@ enum SessionError {
 
 #[derive(Debug, Serialize, Deserialize)]
 enum OfferError {
-    NetworkError,
-    SessionError,
+    UnableConnect(NetworkError),
+    UnableResume(SessionError),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -136,25 +141,28 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
     let mux = Arc::new(Mutex::new(Multiplex::new(MuxSecret::generate(), Some(pubkey))));
 
     let pipemgr_fut = {
+        let url = copt.remote_url.clone();
         let mux = mux.clone();
         async move {
             let mut pipe: ObfsWsPipe;
             loop {
-                let mux = mux.lock().await;
-
                 // remove any closed ws pipe
-                mux.retain(|p| { p.peer_addr().len() > 0 });
+                mux.lock().await.retain(|p| { p.peer_addr().len() > 0 });
 
-                if mux.iter_pipes().collect::<Vec<_>>().len() > max_conn {
-                    std::mem::drop(mux);
-                    smol::Timer::after(Duration::from_secs(5)).await;
+                if mux.lock().await.iter_pipes().collect::<Vec<_>>().len() > max_conn {
+                    smol::Timer::after(Duration::from_secs(1)).await;
                     continue;
                 }
 
-                pipe = ObfsWsPipe::connect(&copt.remote_url, "").await?;
-                mux.add_pipe(pipe);
-
-                std::mem::drop(mux);
+                pipe = match ObfsWsPipe::connect(&url, "").await {
+                    Ok(v) => v,
+                    Err(err) => {
+                        log::error!("Unable connect to wsocks server: cannot establish websocket conn (URL={:?}): {:?}", &url, err);
+                        smol::Timer::after(Duration::from_secs(10)).await;
+                        continue;
+                    }
+                };
+                mux.lock().await.add_pipe(pipe);
             }
 
             anyhow::Ok(())
@@ -162,11 +170,46 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
     };
 
     let (req_tx, req_rx) = smol::channel::unbounded();
-    let request_fut = async move {
-        loop {
-            let (req, conn) = req_rx.recv().await.unwrap();
-            println!("{:?}", req);
-            println!("{:?}", conn);
+    let request_fut = {
+        let mux = mux.clone();
+        async move {
+            loop {
+                let (req, conn): (Protocol, TcpStream) = req_rx.recv().await.unwrap();
+                let mux = mux.clone();
+                smolscale::spawn(async move {
+                    let req = bincode::serialize(&req).unwrap();
+                    let req_len: [u8; 2] = (req.len() as u16).to_be_bytes(); // convert to big-endian
+
+                    let mut relconn = mux.lock().await.open_conn("").await.unwrap();
+
+                    // send req
+                    relconn.write(&req_len).await.unwrap();
+                    relconn.write_all(&req).await.unwrap();
+
+                    // recv resp
+                    let res_len: usize = {
+                        let mut len = [0u8; 2];
+                        relconn.read_exact(&mut len).await.unwrap();
+                        u16::from_be_bytes(len).into()
+                    };
+                    let res = {
+                        let mut buf = b".".repeat(res_len);
+                        relconn.read_exact(&mut buf).await.unwrap();
+                        buf
+                    };
+
+                    let res: Protocol = bincode::deserialize(&res).unwrap();
+                    match res {
+                        Protocol::TcpOffer { id } => {
+                            smol::future::race(
+                                smol::io::copy(relconn.clone(), conn.clone()),
+                                smol::io::copy(conn, relconn)
+                            ).await.unwrap();
+                        }
+                        _ => { panic!("receive a unexpected frame type from wsocks server, only TcpOffer expected."); }
+                    }
+                }).detach();
+            }
         }
     };
 
@@ -252,6 +295,7 @@ async fn async_main() -> anyhow::Result<()> {
 }
 
 fn main() -> anyhow::Result<()> {
+    env_logger::init();
     smol::block_on(async_main())
 }
 

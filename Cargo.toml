@@ -11,6 +11,7 @@ async-lock = "3.2.0"
 async-std = "1.12.0"
 async-trait = "0.1.77"
 async-tungstenite = { version="0.24.0", features=["async-std-runtime", "async-native-tls"] }
+bincode = "1.3.3"
 bytes = "1.5.0"
 clap = { version = "4.4.13", features = ["derive"] }
 env_logger = "0.10.1"
