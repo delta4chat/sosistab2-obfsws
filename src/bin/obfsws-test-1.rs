@@ -36,7 +36,7 @@ async fn obfsws_test_1() {
         smol::Timer::after(Duration::from_secs(1)).await;
 
         println!("create client");
-        let client_pipe = pipe::ObfsWsPipe::connect("ws://127.0.0.1:7070/abdgi", "metadata").await.unwrap();
+        let client_pipe = pipe::ObfsWsPipe::connect("ws://127.0.0.1:7070/abdgi", "cW+u76c9CENJiPaSdKoYtQ==").await.unwrap();
         println!("{:?}", &client_pipe);
 
 

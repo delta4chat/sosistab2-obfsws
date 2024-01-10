@@ -60,7 +60,7 @@ impl ObfsWsPipe {
         //let inner = async_dup::Mutex::new(inner);
         //let inner = async_dup::Arc::new(inner);
     
-        let (inner_send_tx, inner_send_rx) = smol::channel::unbounded();
+        let (inner_send_tx, inner_send_rx) = smol::channel::bounded(1000);
         let (inner_writer, inner_reader) = inner.split();
         let closed = Arc::new(AtomicBool::new(false));
 
@@ -95,7 +95,7 @@ async fn send_loop(
     closed: Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
     loop {
-        let msg: Bytes = inner_send_rx.recv().await.unwrap();
+        let msg: Bytes = inner_send_rx.recv().await?;
         log::trace!("ws(plain) sending new message: {:?}", &msg);
 
         let result = inner_writer.send( ws::Message::binary(msg) ).await;

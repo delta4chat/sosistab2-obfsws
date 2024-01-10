@@ -18,6 +18,9 @@ use futures_util::{AsyncReadExt, AsyncWriteExt};
 use async_std::sync::Arc;
 use async_lock::Mutex;
 
+// smol
+use smol::channel::{Sender, Receiver};
+
 // async TCP socket
 use async_std::net::{TcpStream, TcpListener};
 
@@ -50,7 +53,7 @@ struct ClientOpt {
     /// a public key of wsocks server, encoded by hex format, usually 32 bytes (provides 256-bit security)
     remote_pubkey: String,
 
-    #[arg(long, default_value="10")]
+    #[arg(long, default_value="1")]
     /// the max limit of opened websocket connection
     remote_max_websockets: u8,
 
@@ -95,6 +98,7 @@ enum NetworkError {
     HostUnreachable,
     ConnectionRefused,
     TtlExpired,
+    Other(String)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -104,11 +108,37 @@ enum SessionError {
     BrokenPipe, // proxied connection is closed by peer 
 }
 
-
 #[derive(Debug, Serialize, Deserialize)]
 enum OfferError {
     UnableConnect(NetworkError),
     UnableResume(SessionError),
+}
+impl NetworkError {
+    fn from(err: std::io::Error) -> Self {
+        use std::io::ErrorKind as k;
+        match err.kind() {
+            // Refused
+            k::ConnectionRefused => Self::ConnectionRefused,
+            k::ConnectionReset => Self::ConnectionRefused,
+            k::ConnectionAborted => Self::ConnectionRefused,
+            k::BrokenPipe => Self::ConnectionRefused,
+
+            // Host unreachable
+            k::TimedOut => Self::HostUnreachable,
+
+            // Not allowed
+            k::PermissionDenied => Self::ConnectionNotAllowed,
+
+            // Network unreachable
+            #[cfg(feature = "io_error_more")]
+            k::NetworkDown => Self::NetworkUnreachable,
+            #[cfg(feature = "io_error_more")]
+            k::NetworkUnreachable => Self::NetworkUnreachable,
+
+            // Other unknown error
+            _ => Self::Other(format!("{:?}", err))
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -231,7 +261,7 @@ impl Etag {
     fn from(pk: MuxPublic, b64: &str) -> anyhow::Result<u64> {
         let buf = BASE64_STANDARD.decode(b64)?;
         if buf.len() != 16 {
-            anyhow::bail!("Wrong length of Sec-Websocket-Key.");
+            anyhow::bail!("Wrong length of Sec-Websocket-Key!");
         }
 
         let nonce = &buf[..8];
@@ -280,12 +310,9 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
     let pubkey = MuxPublic::from_bytes(
         hex2key(&copt.remote_pubkey).expect("[hex::decode] cannot parse remote public key")
     );
+
     // the helper that can generate a unique "session-id" for each request.
     let etag = Etag::new(pubkey);
-    /*
-    while true {
-        println!("{:?}", etag.calc_hash());
-    }*/
 
     let max_conn = copt.remote_max_websockets as usize;
 
@@ -327,7 +354,7 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
         let mux = mux.clone();
         async move {
             loop {
-                let (req, conn): (Protocol, TcpStream) = req_rx.recv().await.unwrap();
+                let (req, conn, resp): (Protocol, TcpStream, Sender<(Result<u128, OfferError>, sosistab2::Stream)>) = req_rx.recv().await.unwrap();
                 let mux = mux.clone();
                 smolscale::spawn(async move {
                     let mut relconn = mux.open_conn("").await.unwrap();
@@ -340,10 +367,7 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
 
                     match res {
                         Protocol::TcpOffer { id } => {
-                            smol::future::race(
-                                smol::io::copy(relconn.clone(), conn.clone()),
-                                smol::io::copy(conn, relconn)
-                            ).await.unwrap();
+                            resp.send((id, relconn)).await.unwrap();
                         }
                         _ => { panic!("receive a unexpected frame type from wsocks server, only TcpOffer expected."); }
                     }
@@ -364,7 +388,9 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
                 smolscale::spawn(async move {
                     let dst: String;
                     let port: u16;
-                    match socksv5::read_version(&conn).await.unwrap() {
+
+                    let version = socksv5::read_version(&conn).await.unwrap();
+                    match version {
                         SocksVersion::V4 => {
                             let req = socksv5::v4::read_request_skip_version(&conn).await.unwrap();
                             port = req.port;
@@ -400,11 +426,44 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
                     }
 
                     let req = Protocol::TcpConnect {
-                        dst,
+                        dst: dst.clone(),
                         port,
                     };
 
-                    req_tx.send((req, conn)).await.unwrap();
+                    let (resp_tx, resp_rx) = smol::channel::bounded(1);
+                    req_tx.send((req, conn.clone(), resp_tx)).await.unwrap();
+
+                    let (offer_id, relconn) = resp_rx.recv().await.unwrap();
+                    match offer_id {
+                        Ok(id) => {
+                            println!("connected to remote {dst:?}#{port:?} ! ID={id:?}");
+                            match version {
+                                SocksVersion::V4 => {
+                                    socksv5::v4::write_request_status(
+                                        &mut conn,
+                                        socksv5::v4::SocksV4RequestStatus::Granted,
+                                        [0, 0, 0, 1],
+                                        port,
+                                    ).await.unwrap();
+                                },
+                                SocksVersion::V5 => {
+                                    socksv5::v5::write_request_status(
+                                        &mut conn,
+                                        socksv5::v5::SocksV5RequestStatus::Success,
+                                        SocksV5Host::Domain(dst.as_bytes().to_vec()),
+                                        port,
+                                    ).await.unwrap();
+                                }
+                            }
+
+                            // forward traffic...
+                            smol::future::race(
+                                smol::io::copy(relconn.clone(), conn.clone()),
+                                smol::io::copy(conn, relconn)
+                            ).await.unwrap();
+                        },
+                        _ => { todo!() }
+                    }
                 }).detach();
             }
         }
@@ -453,7 +512,7 @@ async fn server(sopt: ServerOpt) -> anyhow::Result<()> {
 
     // ws pipe listener - future
     let wpl_fut = {
-        let mut mux_sessions: HashMap<u64, Arc<Multiplex>> = HashMap::new();
+        let mut mux_sessions: HashMap< u64, Arc<Multiplex> > = HashMap::new();
 
         // ws pipe listener
         let wpl = ObfsWsListener::bind(listen).await?;
@@ -465,15 +524,18 @@ async fn server(sopt: ServerOpt) -> anyhow::Result<()> {
                 println!("geted client session: {hash}");
 
                 let server_sk = server_sk.clone();
-                mux_sessions.entry(hash)
+                let mux = mux_sessions.entry(hash)
                 .or_insert_with(move || {
                     let mux = Arc::new(
                         Multiplex::new(server_sk, None)
                     );
-                    mux.add_pipe(pipe);
+                    println!("created new Multiplex!");
                     smolscale::spawn(server_session_loop(mux.clone())).detach();
                     mux
                 });
+                mux.add_pipe(pipe);
+
+                println!("Wsocks Server accepted new ws pipe...");
             }
 
             #[allow(unreachable_code)]
@@ -488,8 +550,51 @@ async fn server(sopt: ServerOpt) -> anyhow::Result<()> {
 async fn server_session_loop(mux: Arc<Multiplex>) -> anyhow::Result<()> {
     loop {
         let mut relconn = mux.accept_conn().await?;
+        println!("session accepted new relconn");
         smolscale::spawn(async move {
             let req = Protocol::recv(&mut relconn).await.unwrap();
+            match req {
+                // invalid due to *we* are server
+                Protocol::TcpOffer{..} => {
+                    anyhow::bail!("unexpected receive a TCP offer from client");
+                },
+
+                // ignore padding.
+                Protocol::Padding{..} => {},
+
+                // valid client request.
+                Protocol::TcpConnect{ dst, port } => {
+                    // try connect to client-requested remote
+                    match smol::net::TcpStream::connect((dst, port)).await {
+                        Ok(conn) => {
+                            let offer = Protocol::TcpOffer {
+                                id: Ok(fastrand::u128(..))
+                            };
+                            offer.send(&mut relconn).await.unwrap();
+
+                            smol::future::race(
+                                smol::io::copy(relconn.clone(), conn.clone()),
+                                smol::io::copy(conn, relconn)
+                            ).await.unwrap();
+                        },
+                        Err(err) => {
+                            let offer = Protocol::TcpOffer {
+                                id: Err(
+                                    OfferError::UnableConnect(
+                                        NetworkError::from(err)
+                                    )
+                                ),
+                            };
+                            offer.send(&mut relconn).await.unwrap();
+                            std::mem::drop(relconn);
+                        }
+                    }
+                },
+                Protocol::TcpResume{..} => { todo!() },
+                Protocol::TcpClose{..} => { todo!() },
+
+            }
+            Ok(())
         }).detach();
     }
 }
@@ -511,4 +616,3 @@ fn main() -> anyhow::Result<()> {
     env_logger::init();
     smol::block_on(async_main())
 }
-
