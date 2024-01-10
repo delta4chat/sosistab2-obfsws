@@ -11,6 +11,7 @@ repository="https://github.com/delta4chat/sosistab2-obfsws"
 
 [dependencies]
 anyhow = "1.0.79"
+async-h1 = "2.3.4"
 async-lock = "3.2.0"
 async-std = "1.12.0"
 async-trait = "0.1.77"

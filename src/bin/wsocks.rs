@@ -378,12 +378,12 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
 
     let socks_fut = {
         let req_tx = req_tx.clone();
-        let socks = TcpListener::bind(copt.local_socks_listen).await?;
+        let socksd = TcpListener::bind(copt.local_socks_listen).await?;
         async move {
             let mut conn: TcpStream;
             let mut peer: SocketAddr;
             loop {
-                (conn, peer) = socks.accept().await.unwrap();
+                (conn, peer) = socksd.accept().await.unwrap();
                 let req_tx = req_tx.clone();
                 smolscale::spawn(async move {
                     let dst: String;
@@ -436,7 +436,7 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
                     let (offer_id, relconn) = resp_rx.recv().await.unwrap();
                     match offer_id {
                         Ok(id) => {
-                            println!("connected to remote {dst:?}#{port:?} ! ID={id:?}");
+                            println!("connected to remote {dst:?}:{port:?} ! ID={id:?}");
                             match version {
                                 SocksVersion::V4 => {
                                     socksv5::v4::write_request_status(
@@ -469,7 +469,65 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
         }
     };
 
+    let http_fut = {
+        let req_tx = req_tx.clone();
+        let httpd = TcpListener::bind(copt.local_http_listen).await?;
+        async move {
+            let mut conn: TcpStream;
+            let mut peer: SocketAddr;
+            loop {
+                (conn, peer) = httpd.accept().await.unwrap();
+                let req_tx = req_tx.clone();
+                smolscale::spawn(async move {
+                    let dst: String;
+                    let port: u16;
+
+                    println!("http received request from {peer:?}");
+                    let (req, _) = async_h1::server::decode(conn.clone()).await.unwrap().unwrap();
+                    let url = req.url();
+                    println!("Debug incoming http request: url={:?} parsed={req:?}", url.to_string());
+                    let method = req.method().to_string();
+                    match &method[..] {
+                        "CONNECT" => {
+                            dst = url.host_str().expect("cannot parse 'host' from http proxy request").to_string();
+                            port = url.port_or_known_default().expect("cannot parse 'port' from http proxy request");
+
+                            let req = Protocol::TcpConnect {
+                                dst: dst.clone(),
+                                port
+                            };
+
+                            let (resp_tx, resp_rx) = smol::channel::bounded(1);
+                            req_tx.send((req, conn.clone(), resp_tx)).await.unwrap();
+
+                            let (offer_id, relconn) = resp_rx.recv().await.unwrap();
+                            match offer_id {
+                                Ok(id) => {
+                                    println!("connected to remote {dst:?}:{port:?} ! ID={id:?}");
+
+                                    conn.write_all(b"HTTP/1.0 200 Connection established\r\n\r\n").await.unwrap();
+        
+                                    // forward traffic...
+                                    smol::future::race(
+                                        smol::io::copy(relconn.clone(), conn.clone()),
+                                        smol::io::copy(conn, relconn)
+                                    ).await.unwrap();
+                                },
+                                _ => { todo!() }
+                            }
+                        },
+                        _ => {
+                            conn.write_all(b"HTTP/1.0 400 unsupported non-CONNECT request\r\n\r\n").await.unwrap();
+                            conn.close().await.unwrap();
+                        }
+                    }
+                }).detach();
+            }
+        }
+    };
+
     mux.add_drop_friend(smolscale::spawn(socks_fut));
+    mux.add_drop_friend(smolscale::spawn(http_fut));
     mux.add_drop_friend(smolscale::spawn(request_fut));
 
     pipemgr_fut.await
