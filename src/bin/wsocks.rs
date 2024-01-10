@@ -1,5 +1,5 @@
 // mux
-use sosistab2::Multiplex;
+use sosistab2::{Multiplex, Stream};
 
 // pipe
 use sosistab2::{Pipe, PipeListener};
@@ -28,6 +28,13 @@ use socksv5::v5::{SocksV5Request, SocksV5Host, SocksV5AuthMethod};
 
 // time
 use std::time::{Duration, SystemTime, Instant};
+
+// standard base64 encode/decode
+use base64::Engine;
+use base64::prelude::BASE64_STANDARD;
+
+// CHACHA20 cipher
+use cryptoxide::chacha20::ChaCha20;
 
 // command line parse
 use clap::Parser;
@@ -137,8 +144,38 @@ enum Protocol {
     UDPAssociate {}
     */
 }
+impl Protocol {
+    async fn send(&self, mut relconn: impl AsyncWriteExt + Unpin) -> anyhow::Result<()> {
+        let buf = bincode::serialize(self)?;
 
-#[derive(Debug)]
+        let len: usize = buf.len();
+        if len > 65535 {
+            anyhow::bail!("Bug: Protocol Frame too large! all frame should equal or small than 65535.");
+        }
+        let len: [u8; 2] = (len as u16).to_be_bytes();
+
+        let mut msg = Vec::new();
+        msg.extend(&len);
+        msg.extend(&buf);
+        relconn.write_all(&msg).await?;
+        Ok(())
+    }
+
+    async fn recv(mut relconn: impl AsyncReadExt + Unpin) -> anyhow::Result<Self> {
+        let mut len = [0u8; 2];
+        relconn.read_exact(&mut len).await?;
+
+        let len = u16::from_be_bytes(len) as usize;
+        let mut buf = b".".repeat(len);
+        relconn.read_exact(&mut buf).await?;
+
+        let this: Self = bincode::deserialize(&buf)?;
+        Ok(this)
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
 struct Etag {
     id: u128,
     time: SystemTime,
@@ -153,32 +190,109 @@ impl Etag {
             pk,
         }
     }
+
+
+    fn calc_hash(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.hash(&mut h);
+        h.finish()
+    }
+
+    fn generate(&self) -> String {
+        let nonce: [u8; 8] = fastrand::u64(..).to_be_bytes();
+        let hash: [u8; 8] = self.calc_hash().to_be_bytes();
+
+        let out = {
+            // first we encrypt the hash result.
+            let mut hash = hash.clone();
+            ChaCha20::new(self.pk.as_bytes(), &nonce).process_mut(&mut hash);
+
+            // structs the buffer for storage output
+            let mut buf = Vec::new();
+
+            // first 8 bytes: random-generated nonce.
+            buf.extend(nonce);
+
+            // last 8 bytes: encrypted hash.
+            buf.extend(hash);
+
+            // now we get the "Sec-Websocket-Key"
+            buf
+        };
+        // make sure we generates a valid Websocket-Key
+        assert_eq!(out.len(), 16);
+
+        // encode as base64 and output.
+        let out = BASE64_STANDARD.encode(out);
+        out
+    }
+
+    fn from(pk: MuxPublic, b64: &str) -> anyhow::Result<u64> {
+        let buf = BASE64_STANDARD.decode(b64)?;
+        if buf.len() != 16 {
+            anyhow::bail!("Wrong length of Sec-Websocket-Key.");
+        }
+
+        let nonce = &buf[..8];
+        assert_eq!(nonce.len(), 8);
+        let mut hash = buf[8..].to_vec();
+        assert_eq!(hash.len(), 8);
+
+        ChaCha20::new(pk.as_bytes(), &nonce).process_mut(&mut hash);
+
+        // this hack is needed for convert from &[u8] to [u8; 8]
+        // is there anyone can tell me a best way?
+        let hash = {
+            let mut h = [0u8; 8];
+            for i in 0..8 {
+                h[i] = hash[i];
+            }
+            u64::from_be_bytes(h)
+        };
+        Ok(hash)
+    }
 }
 
 const NS_WSOCKS_CLIENT: &[u8; 32] = b"\xb2\xdf\xa0\x91\xde\xc2\x07\xbf\xce\x9e\x9f\x82\xb4\xf6\x85\x16\xe2\xb6\xae\xf8\xab\xa4\xa0\x90\x96\xd3\xf8\xfe\x02\xcb\xc5\xa8";
 
-impl ToString for Etag {
-    fn to_string(&self) -> String {
-        let out = format!("{:?}", self);
-        let out = blake3::keyed_hash(NS_WSOCKS_CLIENT, out.as_bytes());
-        let out = &out.as_bytes()[0..16];
-        let out = base64::encode(out);
-        out
+impl std::hash::Hash for Etag {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        let h = format!("{:?}", self);
+        let h = blake3::keyed_hash(NS_WSOCKS_CLIENT, h.as_bytes());
+        state.write(h.as_bytes());
     }
 }
+
+impl ToString for Etag {
+    fn to_string(&self) -> String {
+        self.generate()
+    }
+}
+impl ToString for &Etag {
+    fn to_string(&self) -> String {
+        self.generate()
+    }
+}
+
 
 async fn client(copt: ClientOpt) -> anyhow::Result<()> {
     let pubkey = MuxPublic::from_bytes(
         hex2key(&copt.remote_pubkey).expect("[hex::decode] cannot parse remote public key")
     );
-
-    let etag = Etag::new(pubkey).to_string();
+    // the helper that can generate a unique "session-id" for each request.
+    let etag = Etag::new(pubkey);
+    /*
+    while true {
+        println!("{:?}", etag.calc_hash());
+    }*/
 
     let max_conn = copt.remote_max_websockets as usize;
 
     let mux = Arc::new(Multiplex::new(MuxSecret::generate(), Some(pubkey)));
 
     let pipemgr_fut = {
+        let etag = etag.clone();
         let url = copt.remote_url.clone();
         let mux = mux.clone();
         async move {
@@ -203,6 +317,7 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
                 mux.add_pipe(pipe);
             }
 
+            #[allow(unreachable_code)]
             anyhow::Ok(())
         }
     };
@@ -215,28 +330,14 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
                 let (req, conn): (Protocol, TcpStream) = req_rx.recv().await.unwrap();
                 let mux = mux.clone();
                 smolscale::spawn(async move {
-                    let req = bincode::serialize(&req).unwrap();
-                    let req_len: [u8; 2] = (req.len() as u16).to_be_bytes(); // convert to big-endian
-
                     let mut relconn = mux.open_conn("").await.unwrap();
 
                     // send req
-                    relconn.write(&req_len).await.unwrap();
-                    relconn.write_all(&req).await.unwrap();
+                    req.send(&mut relconn).await.unwrap();
 
                     // recv resp
-                    let res_len: usize = {
-                        let mut len = [0u8; 2];
-                        relconn.read_exact(&mut len).await.unwrap();
-                        u16::from_be_bytes(len).into()
-                    };
-                    let res = {
-                        let mut buf = b".".repeat(res_len);
-                        relconn.read_exact(&mut buf).await.unwrap();
-                        buf
-                    };
+                    let res = Protocol::recv(&mut relconn).await.unwrap();
 
-                    let res: Protocol = bincode::deserialize(&res).unwrap();
                     match res {
                         Protocol::TcpOffer { id } => {
                             smol::future::race(
@@ -318,10 +419,9 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
 async fn server(sopt: ServerOpt) -> anyhow::Result<()> {
     let key_file = sopt.key_file.clone();
     let listen = sopt.listen.clone();
-    let mut mux: HashMap<String, Arc<Multiplex>> = HashMap::new();
 
     let mut i = 0;
-    let sk: MuxSecret = loop {
+    let server_sk: MuxSecret = loop {
         // this is important for avoid infinity loop
         i += 1;
         if i >= 10 {
@@ -341,28 +441,57 @@ async fn server(sopt: ServerOpt) -> anyhow::Result<()> {
                 anyhow::bail!("Key file {key_file:?} is corrupted! your server's long-term secret key probably lost. please check.");
             }
             Err(err) => {
-                log::warn!("Cannot read your key file {key_file:?} (Error={err:?})... so generate new secret key, then save it into disk.");
+                log::warn!("Cannot read your long-term secret key file {key_file:?} (Error={err:?})... so generate new secret key, then save it into disk.");
                 let sk = MuxSecret::generate();
                 smol::fs::write(&key_file, sk.to_bytes()).await.expect("Cannot write new key to disk!?");
             }
         }
     };
 
+    let server_pk = server_sk.to_public();
+    println!("Server Public Key: {:?}", hex::encode(server_pk.as_bytes()));
+
     // ws pipe listener - future
     let wpl_fut = {
-        let mux = mux.clone();
+        let mut mux_sessions: HashMap<u64, Arc<Multiplex>> = HashMap::new();
 
         // ws pipe listener
         let wpl = ObfsWsListener::bind(listen).await?;
 
         async move {
             loop {
-                let pipe: Arc<dyn Pipe> = wpl.accept_pipe().await.unwrap();
+                let pipe: Arc<dyn Pipe> = wpl.accept_pipe().await?;
+                let hash: u64 = Etag::from(server_pk, pipe.peer_metadata())?;
+                println!("geted client session: {hash}");
+
+                let server_sk = server_sk.clone();
+                mux_sessions.entry(hash)
+                .or_insert_with(move || {
+                    let mux = Arc::new(
+                        Multiplex::new(server_sk, None)
+                    );
+                    mux.add_pipe(pipe);
+                    smolscale::spawn(server_session_loop(mux.clone())).detach();
+                    mux
+                });
             }
+
+            #[allow(unreachable_code)]
+            Ok::<_, anyhow::Error>(())
         }
     };
 
+    wpl_fut.await?;
+
     todo!()
+}
+async fn server_session_loop(mux: Arc<Multiplex>) -> anyhow::Result<()> {
+    loop {
+        let mut relconn = mux.accept_conn().await?;
+        smolscale::spawn(async move {
+            let req = Protocol::recv(&mut relconn).await.unwrap();
+        }).detach();
+    }
 }
 
 async fn async_main() -> anyhow::Result<()> {

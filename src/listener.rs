@@ -55,9 +55,24 @@ async fn pipe_accept_loop(
 
 fn pipe_get_metadata(md_tx: Sender<String>) -> impl ws::Callback {
     move |req: &ws::Request, res: ws::Response| {
-        let md = req.headers().get("Sec-Websocket-Key").unwrap();
-        md_tx.try_send(md.to_str().unwrap().to_string()).unwrap();
-        Ok(res)
+        let res400 = {
+            let mut r = ws::ErrorResponse::new(None);
+            *r.status_mut() = 400.try_into().unwrap();
+            let mut h = r.headers_mut();
+            h.insert("Connection", "close".try_into().unwrap());
+            r
+        };
+
+        if let Some(md) = req.headers().get("Sec-Websocket-Key") {
+            if let Ok(v) = base64::decode(md) {
+                if v.len() == 16 {
+                    md_tx.try_send(md.to_str().unwrap().to_string()).unwrap();
+                    return Ok(res);
+                }
+            }
+        }
+
+        Err(res400)
     }
 }
 
