@@ -12,6 +12,9 @@ use std::sync::Arc;
 
 use sosistab2::{Pipe, PipeListener};
 
+use base64::Engine;
+use base64::prelude::BASE64_STANDARD;
+
 pub struct ObfsWsListener {
     pipe_rx: Receiver<ObfsWsPipe>,
     _task: Task<anyhow::Result<()>>
@@ -40,6 +43,7 @@ async fn pipe_accept_loop(
 
     loop {
         (conn, addr) = socket.accept().await?;
+        log::trace!("ws pipe listener accepted raw TCP connection from {addr:?}");
 
         let pipe_tx = pipe_tx.clone();
         smolscale::spawn(async move {
@@ -58,13 +62,13 @@ fn pipe_get_metadata(md_tx: Sender<String>) -> impl ws::Callback {
         let res400 = {
             let mut r = ws::ErrorResponse::new(None);
             *r.status_mut() = 400.try_into().unwrap();
-            let mut h = r.headers_mut();
+            let h = r.headers_mut();
             h.insert("Connection", "close".try_into().unwrap());
             r
         };
 
         if let Some(md) = req.headers().get("Sec-Websocket-Key") {
-            if let Ok(v) = base64::decode(md) {
+            if let Ok(v) = BASE64_STANDARD.decode(md) {
                 if v.len() == 16 {
                     md_tx.try_send(md.to_str().unwrap().to_string()).unwrap();
                     return Ok(res);

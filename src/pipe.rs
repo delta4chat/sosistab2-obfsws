@@ -1,10 +1,10 @@
-use std::net::SocketAddr;
+/*use std::net::SocketAddr;*/
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 
 use bytes::Bytes;
 
 use async_trait::async_trait;
-use futures_util::{StreamExt, AsyncWriteExt, AsyncWrite, sink::SinkExt};
+use futures_util::{StreamExt, /*AsyncWriteExt, AsyncWrite,*/ sink::SinkExt};
 use futures_util::stream::{SplitStream, SplitSink};
 
 use crate::ws;
@@ -51,6 +51,7 @@ impl ObfsWsPipe {
             .body(())
             .unwrap();
         let (inner, resp) = ws::connect_async(req).await?;
+        log::trace!("ws pipe connected: inner={inner:?} | resp={resp:?}");
         let mut this = Self::new(inner, &peer_metadata);
         this.peer_url = Some(peer_url.to_string());
         Ok(this)

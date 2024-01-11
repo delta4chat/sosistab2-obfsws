@@ -1,5 +1,5 @@
 // mux
-use sosistab2::{Multiplex, Stream};
+use sosistab2::{Multiplex, /*Stream*/};
 
 // pipe
 use sosistab2::{Pipe, PipeListener};
@@ -13,21 +13,22 @@ use sosistab2::{MuxSecret, MuxPublic};
 
 // traits
 use futures_util::{AsyncReadExt, AsyncWriteExt};
+use rand::RngCore;
 
 // concurrent lock
 use async_std::sync::Arc;
-use async_lock::Mutex;
+/*use async_lock::Mutex;*/
 
 // smol
-use smol::channel::{Sender, Receiver};
+use smol::channel::{Sender, /*Receiver*/};
 
 // async TCP socket
 use async_std::net::{TcpStream, TcpListener};
 
 // socks protocol implemention
 use socksv5::SocksVersion;
-use socksv5::v4::{SocksV4Request, SocksV4Host};
-use socksv5::v5::{SocksV5Request, SocksV5Host, SocksV5AuthMethod};
+use socksv5::v4::{/*SocksV4Request,*/ SocksV4Host};
+use socksv5::v5::{/*SocksV5Request,*/ SocksV5Host, SocksV5AuthMethod};
 
 // time
 use std::time::{Duration, SystemTime, Instant};
@@ -46,7 +47,7 @@ use clap::Parser;
 #[command(version)]
 struct ClientOpt {
     #[arg(long)]
-    /// URL of wsocks server. e.g. ws://example.com/DestroyGFW
+    /// URL of wsocks server. e.g. wss://example.com/DestroyGFW
     remote_url: String,
 
     #[arg(long)]
@@ -204,23 +205,38 @@ impl Protocol {
     }
 }
 
+// a helper for create "per-application unique" hash
+const NS_WSOCKS_CLIENT_ETAG: &[u8; 32] = b"\xb2\xdf\xa0\x91\xde\xc2\x07\xbf\xce\x9e\x9f\x82\xb4\xf6\x85\x16\xe2\xb6\xae\xf8\xab\xa4\xa0\x90\x96\xd3\xf8\xfe\x02\xcb\xc5\xa8";
+// this is used for generate client session key
+fn client_etag_hash(data: &[u8]) -> blake3::Hash {
+    blake3::keyed_hash(NS_WSOCKS_CLIENT_ETAG, data)
+}
+
+const NS_WSOCKS_SERVER_SECRET: &[u8; 32] = b"\xb6\xae\xa3\x98\xc4\xde\xf3\x10\xf8\xc5\xe8\x14\x0e\xd4\xbc\x9e\x81\xc5\x9f\xc8\x1d\xe8\xce\xe1\xd6\xf9\x95\xf3\x12\x0f\xbf\x11";
+fn server_sk_hash(data: &[u8]) -> blake3::Hash {
+    blake3::keyed_hash(NS_WSOCKS_SERVER_SECRET, data)
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct Etag {
-    id: u128,
-    time: SystemTime,
-    pk: MuxPublic,
+    random: Vec<u8>,
+    time1: SystemTime,
+    time2: Instant,
+    pk_hash: blake3::Hash,
 }
 
 impl Etag {
     fn new(pk: MuxPublic) -> Self {
+        let mut random = b".".repeat(1024);
+        rand::thread_rng().fill_bytes(&mut random);
         Self {
-            id: fastrand::u128(..),
-            time: SystemTime::now(),
-            pk,
+            random,
+            time1: SystemTime::now(),
+            time2: Instant::now(),
+            pk_hash: client_etag_hash(pk.as_bytes()),
         }
     }
-
 
     fn calc_hash(&self) -> u64 {
         use std::hash::{Hash, Hasher};
@@ -236,9 +252,9 @@ impl Etag {
         let out = {
             // first we encrypt the hash result.
             let mut hash = hash.clone();
-            ChaCha20::new(self.pk.as_bytes(), &nonce).process_mut(&mut hash);
+            ChaCha20::new(self.pk_hash.as_bytes(), &nonce).process_mut(&mut hash);
 
-            // structs the buffer for storage output
+            // structs the buffer for store output
             let mut buf = Vec::new();
 
             // first 8 bytes: random-generated nonce.
@@ -269,7 +285,8 @@ impl Etag {
         let mut hash = buf[8..].to_vec();
         assert_eq!(hash.len(), 8);
 
-        ChaCha20::new(pk.as_bytes(), &nonce).process_mut(&mut hash);
+        let pk = pk.as_bytes();
+        ChaCha20::new(client_etag_hash(pk).as_bytes(), &nonce).process_mut(&mut hash);
 
         // this hack is needed for convert from &[u8] to [u8; 8]
         // is there anyone can tell me a best way?
@@ -284,12 +301,10 @@ impl Etag {
     }
 }
 
-const NS_WSOCKS_CLIENT: &[u8; 32] = b"\xb2\xdf\xa0\x91\xde\xc2\x07\xbf\xce\x9e\x9f\x82\xb4\xf6\x85\x16\xe2\xb6\xae\xf8\xab\xa4\xa0\x90\x96\xd3\xf8\xfe\x02\xcb\xc5\xa8";
-
 impl std::hash::Hash for Etag {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         let h = format!("{:?}", self);
-        let h = blake3::keyed_hash(NS_WSOCKS_CLIENT, h.as_bytes());
+        let h = client_etag_hash(h.as_bytes());
         state.write(h.as_bytes());
     }
 }
@@ -355,6 +370,7 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
         async move {
             loop {
                 let (req, conn, resp): (Protocol, TcpStream, Sender<(Result<u128, OfferError>, sosistab2::Stream)>) = req_rx.recv().await.unwrap();
+                log::trace!("local proxy server received new request: req={req:?} | conn={conn:?}");
                 let mux = mux.clone();
                 smolscale::spawn(async move {
                     let mut relconn = mux.open_conn("").await.unwrap();
@@ -384,6 +400,7 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
             let mut peer: SocketAddr;
             loop {
                 (conn, peer) = socksd.accept().await.unwrap();
+                log::trace!("local socks listener accept raw TCP connection from {peer:?}");
                 let req_tx = req_tx.clone();
                 smolscale::spawn(async move {
                     let dst: String;
@@ -547,26 +564,24 @@ async fn server(sopt: ServerOpt) -> anyhow::Result<()> {
 
         match smol::fs::read(&key_file).await {
             Ok(data) => {
-                if data.len() == 32 {
-                    let mut key = [0u8; 32];
-                    for i in 0..32 {
-                        key[i] = data[i];
-                    }
-                    break MuxSecret::from_bytes(key);
-                }
-
-                anyhow::bail!("Key file {key_file:?} is corrupted! your server's long-term secret key probably lost. please check.");
+                let key = server_sk_hash(&data);
+                break MuxSecret::from_bytes(key.into());
             }
             Err(err) => {
                 log::warn!("Cannot read your long-term secret key file {key_file:?} (Error={err:?})... so generate new secret key, then save it into disk.");
-                let sk = MuxSecret::generate();
-                smol::fs::write(&key_file, sk.to_bytes()).await.expect("Cannot write new key to disk!?");
+                let pre_sk = {
+                    let buf_len = fastrand::usize(2048..=8192);
+                    let mut buf = b".".repeat(buf_len);
+                    rand::thread_rng().fill_bytes(&mut buf);
+                    buf
+                };
+                smol::fs::write(&key_file, pre_sk).await.expect("Cannot write new key to disk!?");
             }
         }
     };
 
     let server_pk = server_sk.to_public();
-    println!("Server Public Key: {:?}", hex::encode(server_pk.as_bytes()));
+    eprintln!("Server Public Key: {:?}", hex::encode(server_pk.as_bytes()));
 
     // ws pipe listener - future
     let wpl_fut = {
