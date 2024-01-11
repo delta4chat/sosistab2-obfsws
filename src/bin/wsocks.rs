@@ -144,11 +144,6 @@ impl NetworkError {
 
 #[derive(Debug, Serialize, Deserialize)]
 enum Protocol {
-    // this frame is for hide metadata of packet length, so it's content is complete junk and can be safety ignored
-    Padding {
-        junk: Vec<u8>,
-    },
-
     // client wants to open a new TCP connection
     TcpConnect {
         dst: String, // can be IP address or Domain name
@@ -170,13 +165,47 @@ enum Protocol {
         id: Result<u128, OfferError>,
     },
 
+    // proxied TCP stream data. send by both client and server
+    TcpData {
+        id: u128,
+        payload: Vec<u8>,
+    },
+
     /*
-    TcpBind {}
-    UDPAssociate {}
+    TcpBind {
+        addr: SocketAddr,
+    },
+    UDPAssociate {
+    },
+    UDPOffer {
+        id: Result<u128, OfferError>,
+    },
+    UDPMessage {
+        id: u128,
+        src_addr: SocketAddr,
+        dst_addr: SocketAddr,
+        message: Vec<u8>,
+    },
     */
 }
-impl Protocol {
-    fn to_bytes(&self) -> anyhow::Result<Vec<u8>> {
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Frame {
+    protocol: Protocol,
+    // this field is for hide metadata of packet length, so it's content is complete junk and can be safety ignored
+    padding: Vec<u8>,
+}
+
+impl From<Protocol> for Frame {
+    fn from(protocol: Protocol) -> Self {
+        Self {
+            protocol,
+            padding: b".".repeat(fastrand::usize(1..=128))
+        }
+    }
+}
+impl Frame {
+    async fn send(&self, mut relconn: impl AsyncWriteExt + Unpin) -> anyhow::Result<()> {
         let buf = bincode::serialize(self)?;
 
         let len: usize = buf.len();
@@ -188,20 +217,6 @@ impl Protocol {
         let mut msg = Vec::new();
         msg.extend(&len);
         msg.extend(&buf);
-        Ok(msg)
-    }
-
-    async fn send(&self, mut relconn: impl AsyncWriteExt + Unpin) -> anyhow::Result<()> {
-        let mut msg = self.to_bytes()?;
-
-        // add a random length padding
-        let padding = {
-            let junk = b".".repeat(fastrand::usize(1..=128));
-            let p = Self::Padding { junk };
-            p.to_bytes()?
-        };
-        msg.extend(&padding);
-
         relconn.write_all(&msg).await?;
         Ok(())
     }
@@ -390,10 +405,10 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
                     let mut relconn = mux.open_conn("").await.unwrap();
 
                     // send req
-                    req.send(&mut relconn).await.unwrap();
+                    Frame::from(req).send(&mut relconn).await.unwrap();
 
                     // recv resp
-                    let res = Protocol::recv(&mut relconn).await.unwrap();
+                    let res = Frame::recv(&mut relconn).await.unwrap().protocol;
 
                     match res {
                         Protocol::TcpOffer { id } => {
@@ -467,7 +482,7 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
                     let (offer_id, relconn) = resp_rx.recv().await.unwrap();
                     match offer_id {
                         Ok(id) => {
-                            println!("connected to remote {dst:?}:{port:?} ! ID={id:?}");
+                            println!("(Socks proxy) connected to remote {dst:?}:{port:?} ! ID={id:?}");
                             match version {
                                 SocksVersion::V4 => {
                                     socksv5::v4::write_request_status(
@@ -488,10 +503,11 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
                             }
 
                             // forward traffic...
-                            smol::future::race(
+                            tcp_forward_loop(id, conn, relconn).await.unwrap();
+                            /*smol::future::race(
                                 smol::io::copy(relconn.clone(), conn.clone()),
                                 smol::io::copy(conn, relconn)
-                            ).await.unwrap();
+                            ).await.unwrap();*/
                         },
                         _ => { todo!() }
                     }
@@ -534,15 +550,16 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
                             let (offer_id, relconn) = resp_rx.recv().await.unwrap();
                             match offer_id {
                                 Ok(id) => {
-                                    println!("connected to remote {dst:?}:{port:?} ! ID={id:?}");
+                                    println!("(HTTP proxy) connected to remote {dst:?}:{port:?} ! ID={id:?}");
 
                                     conn.write_all(b"HTTP/1.0 200 Connection established\r\n\r\n").await.unwrap();
         
                                     // forward traffic...
-                                    smol::future::race(
+                                    tcp_forward_loop(id, conn, relconn).await.unwrap();
+                                    /*smol::future::race(
                                         smol::io::copy(relconn.clone(), conn.clone()),
                                         smol::io::copy(conn, relconn)
-                                    ).await.unwrap();
+                                    ).await.unwrap();*/
                                 },
                                 _ => { todo!() }
                             }
@@ -639,30 +656,35 @@ async fn server_session_loop(mux: Arc<Multiplex>) -> anyhow::Result<()> {
         let mut relconn = mux.accept_conn().await?;
         println!("session accepted new relconn");
         smolscale::spawn(async move {
-            let req = Protocol::recv(&mut relconn).await.unwrap();
+            let req = Frame::recv(&mut relconn).await.unwrap().protocol;
             match req {
+                Protocol::TcpData{..} => {
+                    anyhow::bail!("unexcepted receive a TCP data without handshake");
+                },
+
                 // invalid due to *we* are server
                 Protocol::TcpOffer{..} => {
                     anyhow::bail!("unexpected receive a TCP offer from client");
                 },
-
-                // ignore padding.
-                Protocol::Padding{..} => {},
 
                 // valid client request.
                 Protocol::TcpConnect{ dst, port } => {
                     // try connect to client-requested remote
                     match smol::net::TcpStream::connect((dst, port)).await {
                         Ok(conn) => {
+                            let id = fastrand::u128(..);
                             let offer = Protocol::TcpOffer {
-                                id: Ok(fastrand::u128(..))
+                                id: Ok(id),
                             };
-                            offer.send(&mut relconn).await.unwrap();
+                            Frame::from(offer).send(&mut relconn).await.unwrap();
 
+                            tcp_forward_loop(id, conn, relconn).await.unwrap();
+                            /*
                             smol::future::race(
                                 smol::io::copy(relconn.clone(), conn.clone()),
                                 smol::io::copy(conn, relconn)
                             ).await.unwrap();
+                            */
                         },
                         Err(err) => {
                             let offer = Protocol::TcpOffer {
@@ -672,7 +694,7 @@ async fn server_session_loop(mux: Arc<Multiplex>) -> anyhow::Result<()> {
                                     )
                                 ),
                             };
-                            offer.send(&mut relconn).await.unwrap();
+                            Frame::from(offer).send(&mut relconn).await.unwrap();
                             std::mem::drop(relconn);
                         }
                     }
@@ -684,6 +706,50 @@ async fn server_session_loop(mux: Arc<Multiplex>) -> anyhow::Result<()> {
             Ok(())
         }).detach();
     }
+}
+
+async fn tcp_forward_loop<RW: AsyncReadExt + AsyncWriteExt + Clone + Unpin>(
+    offer_id: u128,
+    mut conn: RW, // for compatible many variants of "smol::net::TcpStream", "async_std::net::TcpStream", "async_net::TcpStream", etc...
+    mut relconn: sosistab2::Stream,
+) -> anyhow::Result<()> {
+    let down_fut = {
+        let mut relconn = relconn.clone();
+        let mut conn = conn.clone();
+        async move {
+            let mut frame;
+            loop {
+                frame = Frame::recv(&mut relconn).await?;
+
+                match frame.protocol {
+                    Protocol::TcpData {
+                        id, payload
+                    } => {
+                        assert_eq!(id, offer_id);
+                        conn.write_all(&payload).await?;
+                    },
+
+                    _ => { todo!() }
+                }
+            }
+        }
+    };
+
+    let up_fut = async move {
+        let mut buf = b".".repeat(65535);
+        let mut frame;
+        loop {
+            let size = conn.read(&mut buf).await?;
+
+            frame = Frame::from(Protocol::TcpData {
+                id: offer_id,
+                payload: (&buf[..size]).to_vec(),
+            });
+            frame.send(&mut relconn).await?;
+        }
+    };
+
+    smol::future::race(up_fut, down_fut).await
 }
 
 async fn async_main() -> anyhow::Result<()> {
