@@ -54,7 +54,7 @@ struct ClientOpt {
     /// a public key of wsocks server, encoded by hex format, usually 32 bytes (provides 256-bit security)
     remote_pubkey: String,
 
-    #[arg(long, default_value="1")]
+    #[arg(long, default_value="10")]
     /// the max limit of opened websocket connection
     remote_max_websockets: u8,
 
@@ -71,7 +71,7 @@ struct ServerOpt {
     #[arg(long, default_value="[::]:2038")]
     listen: SocketAddr,
 
-    #[arg(long, default_value=".wsocks-server-secret-key")]
+    #[arg(long)]
     key_file: String,
 
     #[arg(long)]
