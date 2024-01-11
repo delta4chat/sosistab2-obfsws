@@ -13,7 +13,7 @@ use sosistab2::{MuxSecret, MuxPublic};
 
 // traits
 use futures_util::{AsyncReadExt, AsyncWriteExt};
-use rand::RngCore;
+use rand::{Rng, RngCore};
 
 // concurrent lock
 use async_std::sync::Arc;
@@ -27,8 +27,8 @@ use async_std::net::{TcpStream, TcpListener};
 
 // socks protocol implemention
 use socksv5::SocksVersion;
-use socksv5::v4::{/*SocksV4Request,*/ SocksV4Host};
-use socksv5::v5::{/*SocksV5Request,*/ SocksV5Host, SocksV5AuthMethod};
+use socksv5::v4::{SocksV4RequestStatus, SocksV4Host};
+use socksv5::v5::{SocksV5RequestStatus, SocksV5Host, SocksV5AuthMethod};
 
 // time
 use std::time::{Duration, SystemTime, Instant};
@@ -40,7 +40,7 @@ use base64::prelude::BASE64_STANDARD;
 // CHACHA20 cipher
 use cryptoxide::chacha20::ChaCha20;
 
-// command line parse
+// command line arguments parse
 use clap::Parser;
 
 #[derive(Clone, Debug, clap::Parser)]
@@ -107,19 +107,29 @@ enum NetworkError {
     Other(String)
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-enum SessionError {
-    SessionUnknown, // client sends TcpResume or TcpClose, but conn ID is not found.
-    SessionTimeout, // conn ID exists, but inactive a long time, so reachs the server timeout.
-    BrokenPipe, // proxied connection is closed by peer 
+impl Into<SocksV4RequestStatus> for NetworkError {
+    fn into(self) -> SocksV4RequestStatus {
+        SocksV4RequestStatus::Failed
+    }
+}
+impl Into<SocksV5RequestStatus> for NetworkError {
+    fn into(self) -> SocksV5RequestStatus {
+        match self {
+            Self::ServerFailure => SocksV5RequestStatus::ServerFailure,
+            Self::ConnectionNotAllowed => SocksV5RequestStatus::ConnectionNotAllowed,
+            Self::NetworkUnreachable => SocksV5RequestStatus::NetworkUnreachable,
+            Self::HostUnreachable => SocksV5RequestStatus::HostUnreachable,
+            Self::ConnectionRefused => SocksV5RequestStatus::ConnectionRefused,
+            Self::TtlExpired => SocksV5RequestStatus::TtlExpired,
+            Self::Other(_) => {
+                log::warn!("wsocks server return custom error: {self:?}");
+                SocksV5RequestStatus::ServerFailure
+            }
+        }
+    }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-enum OfferError {
-    UnableConnect(NetworkError),
-    UnableResume(SessionError),
-}
-impl NetworkError {
+impl From<std::io::Error> for NetworkError {
     fn from(err: std::io::Error) -> Self {
         use std::io::ErrorKind as k;
         match err.kind() {
@@ -145,6 +155,19 @@ impl NetworkError {
             _ => Self::Other(format!("{:?}", err))
         }
     }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+enum SessionError {
+    SessionUnknown, // client sends TcpResume or TcpClose, but conn ID is not found.
+    SessionTimeout, // conn ID exists, but inactive a long time, so reachs the server timeout.
+    BrokenPipe, // proxied connection is closed by peer 
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+enum OfferError {
+    UnableConnect(NetworkError),
+    UnableResume(SessionError),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -280,7 +303,7 @@ impl Etag {
     }
 
     fn generate(&self) -> String {
-        let nonce: [u8; 8] = fastrand::u64(..).to_be_bytes();
+        let nonce: [u8; 8] = rand::thread_rng().gen();
         let hash: [u8; 8] = self.calc_hash().to_be_bytes();
 
         let out = {
@@ -353,7 +376,6 @@ impl ToString for &Etag {
         self.generate()
     }
 }
-
 
 async fn client(copt: ClientOpt) -> anyhow::Result<()> {
     let pubkey = MuxPublic::from_bytes(
@@ -492,15 +514,15 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
                                 SocksVersion::V4 => {
                                     socksv5::v4::write_request_status(
                                         &mut conn,
-                                        socksv5::v4::SocksV4RequestStatus::Granted,
-                                        [0, 0, 0, 1],
+                                        SocksV4RequestStatus::Granted,
+                                        [0, 1, 1, 1],
                                         port,
                                     ).await.unwrap();
                                 },
                                 SocksVersion::V5 => {
                                     socksv5::v5::write_request_status(
                                         &mut conn,
-                                        socksv5::v5::SocksV5RequestStatus::Success,
+                                        SocksV5RequestStatus::Success,
                                         SocksV5Host::Domain(dst.as_bytes().to_vec()),
                                         port,
                                     ).await.unwrap();
@@ -514,7 +536,32 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
                                 smol::io::copy(conn, relconn)
                             ).await.unwrap();*/
                         },
-                        _ => { todo!() }
+                        Err(err) => {
+                            let err: NetworkError = match err {
+                                OfferError::UnableConnect(e) => e,
+                                _ => {
+                                    panic!("unexpected received non-UnableConnect ({err:?}) from server, because we does not attempt to TcpResume");
+                                }
+                            };
+                            match version {
+                                SocksVersion::V4 => {
+                                    socksv5::v4::write_request_status(
+                                        &mut conn,
+                                        err.into(),
+                                        [0, 0, 0, 0],
+                                        0,
+                                    ).await.unwrap();
+                                },
+                                SocksVersion::V5 => {
+                                    socksv5::v5::write_request_status(
+                                        &mut conn,
+                                        err.into(),
+                                        SocksV5Host::Ipv4([0, 0, 0, 0]),
+                                        0,
+                                    ).await.unwrap();
+                                },
+                            }
+                        }
                     }
                 }).detach();
             }
