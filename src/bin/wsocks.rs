@@ -176,7 +176,7 @@ enum Protocol {
     */
 }
 impl Protocol {
-    async fn send(&self, mut relconn: impl AsyncWriteExt + Unpin) -> anyhow::Result<()> {
+    fn to_bytes(&self) -> anyhow::Result<Vec<u8>> {
         let buf = bincode::serialize(self)?;
 
         let len: usize = buf.len();
@@ -188,6 +188,20 @@ impl Protocol {
         let mut msg = Vec::new();
         msg.extend(&len);
         msg.extend(&buf);
+        Ok(msg)
+    }
+
+    async fn send(&self, mut relconn: impl AsyncWriteExt + Unpin) -> anyhow::Result<()> {
+        let mut msg = self.to_bytes()?;
+
+        // add a random length padding
+        let padding = {
+            let junk = b".".repeat(fastrand::usize(1..=128));
+            let p = Self::Padding { junk };
+            p.to_bytes()?
+        };
+        msg.extend(&padding);
+
         relconn.write_all(&msg).await?;
         Ok(())
     }
