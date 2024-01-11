@@ -30,7 +30,8 @@ pub struct ObfsWsPipe {
 }
 
 impl ObfsWsPipe {
-    pub async fn connect(peer_url: &str, peer_metadata: impl ToString) -> anyhow::Result<Self> {
+    pub async fn connect(peer_url: impl ToString, peer_metadata: impl ToString) -> anyhow::Result<Self> {
+        let peer_url: String = peer_url.to_string();
         let peer_metadata: String = peer_metadata.to_string();
 
         let peer_url: ws::Uri = peer_url.parse()?;

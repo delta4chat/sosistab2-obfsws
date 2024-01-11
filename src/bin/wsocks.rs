@@ -3,7 +3,7 @@ use sosistab2::{Multiplex, /*Stream*/};
 
 // pipe
 use sosistab2::{Pipe, PipeListener};
-use sosistab2_obfsws::{ObfsWsPipe, ObfsWsListener};
+use sosistab2_obfsws::{ws, ObfsWsPipe, ObfsWsListener};
 
 // types
 use std::net::{SocketAddr, Ipv4Addr, Ipv6Addr};
@@ -48,19 +48,22 @@ use clap::Parser;
 struct ClientOpt {
     #[arg(long)]
     /// URL of wsocks server. e.g. wss://example.com/DestroyGFW
-    remote_url: String,
+    /// both ws:// (plaintext) and wss:// (encrypted) scheme are supported, due to wsocks server is probably behind a reverse-proxy (and TLS is provided by this reverse proxy)
+    remote_url: ws::Uri,
 
     #[arg(long)]
     /// a public key of wsocks server, encoded by hex format, usually 32 bytes (provides 256-bit security)
-    remote_pubkey: String,
+    remote_public_key: String,
 
     #[arg(long, default_value="10")]
     /// the max limit of opened websocket connection
-    remote_max_websockets: u8,
+    remote_pipes_max: u8,
 
-    // client-side proxy tunnels
+    /// local proxy server (socks4 / socks4a / socks5) listen address
     #[arg(long, default_value="127.0.0.1:1989")]
     local_socks_listen: SocketAddr,
+
+    /// local proxy server (HTTP) listen address
     #[arg(long, default_value="127.0.0.1:1986")]
     local_http_listen: SocketAddr,
     /* redsocks_listen: u16, */
@@ -68,6 +71,8 @@ struct ClientOpt {
 
 #[derive(Clone, Debug, clap::Parser)]
 struct ServerOpt {
+    /// ws:// (plaintext) listen address of wsocks server.
+    /// TLS layer should be provided by another reverse proxy.
     #[arg(long, default_value="[::]:2038")]
     listen: SocketAddr,
 
@@ -318,7 +323,7 @@ impl Etag {
         ChaCha20::new(client_etag_hash(pk).as_bytes(), &nonce).process_mut(&mut hash);
 
         // this hack is needed for convert from &[u8] to [u8; 8]
-        // is there anyone can tell me a best way?
+        // is there anyone can tell me a better way?
         let hash = {
             let mut h = [0u8; 8];
             for i in 0..8 {
@@ -352,13 +357,13 @@ impl ToString for &Etag {
 
 async fn client(copt: ClientOpt) -> anyhow::Result<()> {
     let pubkey = MuxPublic::from_bytes(
-        hex2key(&copt.remote_pubkey).expect("[hex::decode] cannot parse remote public key")
+        hex2key(&copt.remote_public_key).expect("[hex::decode] cannot parse remote public key")
     );
 
     // the helper that can generate a unique "session-id" for each request.
     let etag = Etag::new(pubkey);
 
-    let max_conn = copt.remote_max_websockets as usize;
+    let max_conn = copt.remote_pipes_max as usize;
 
     let mux = Arc::new(Multiplex::new(MuxSecret::generate(), Some(pubkey)));
 
@@ -369,10 +374,10 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
         async move {
             let mut pipe: ObfsWsPipe;
             loop {
-                // remove any closed ws pipe
+                // only kept "alive" pipes (remove any closed ws pipe)
                 mux.retain(|p| { p.peer_addr().len() > 0 });
 
-                if mux.iter_pipes().collect::<Vec<_>>().len() > max_conn {
+                if mux.iter_pipes().collect::<Vec<_>>().len() >= max_conn {
                     smol::Timer::after(Duration::from_secs(1)).await;
                     continue;
                 }
@@ -482,7 +487,7 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
                     let (offer_id, relconn) = resp_rx.recv().await.unwrap();
                     match offer_id {
                         Ok(id) => {
-                            println!("(Socks proxy) connected to remote {dst:?}:{port:?} ! ID={id:?}");
+                            eprintln!("(Socks proxy) connected to remote {dst:?}:{port:?} ! ID={id:?}");
                             match version {
                                 SocksVersion::V4 => {
                                     socksv5::v4::write_request_status(
@@ -529,10 +534,10 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
                     let dst: String;
                     let port: u16;
 
-                    println!("http received request from {peer:?}");
+                    eprintln!("http received request from {peer:?}");
                     let (req, _) = async_h1::server::decode(conn.clone()).await.unwrap().unwrap();
                     let url = req.url();
-                    println!("Debug incoming http request: url={:?} parsed={req:?}", url.to_string());
+                    eprintln!("Debug incoming http request: url={:?} parsed={req:?}", url.to_string());
                     let method = req.method().to_string();
                     match &method[..] {
                         "CONNECT" => {
@@ -550,7 +555,7 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
                             let (offer_id, relconn) = resp_rx.recv().await.unwrap();
                             match offer_id {
                                 Ok(id) => {
-                                    println!("(HTTP proxy) connected to remote {dst:?}:{port:?} ! ID={id:?}");
+                                    eprintln!("(HTTP proxy) connected to remote {dst:?}:{port:?} ! ID={id:?}");
 
                                     conn.write_all(b"HTTP/1.0 200 Connection established\r\n\r\n").await.unwrap();
         
@@ -597,7 +602,7 @@ async fn server(sopt: ServerOpt) -> anyhow::Result<()> {
             Ok(data) => {
                 let key = server_sk_hash(&data);
                 break MuxSecret::from_bytes(key.into());
-            }
+            },
             Err(err) => {
                 log::warn!("Cannot read your long-term secret key file {key_file:?} (Error={err:?})... so generate new secret key, then save it into disk.");
                 let pre_sk = {
@@ -612,6 +617,15 @@ async fn server(sopt: ServerOpt) -> anyhow::Result<()> {
     };
 
     let server_pk = server_sk.to_public();
+
+    let info = serde_json::json!({
+        "name": "wsocks - web socks",
+        "version": env!("CARGO_PKG_VERSION"),
+        "public_key": hex::encode(server_pk.as_bytes()),
+        "listen": sopt.listen.to_string(),
+    });
+    println!("{info:#}"); // {:#} format to JSON pretty
+
     eprintln!("Server Public Key: {:?}", hex::encode(server_pk.as_bytes()));
 
     // ws pipe listener - future
@@ -625,7 +639,7 @@ async fn server(sopt: ServerOpt) -> anyhow::Result<()> {
             loop {
                 let pipe: Arc<dyn Pipe> = wpl.accept_pipe().await?;
                 let hash: u64 = Etag::from(server_pk, pipe.peer_metadata())?;
-                println!("geted client session: {hash}");
+                eprintln!("geted client session: {hash}");
 
                 let server_sk = server_sk.clone();
                 let mux = mux_sessions.entry(hash)
@@ -633,13 +647,13 @@ async fn server(sopt: ServerOpt) -> anyhow::Result<()> {
                     let mux = Arc::new(
                         Multiplex::new(server_sk, None)
                     );
-                    println!("created new Multiplex!");
+                    eprintln!("created new Multiplex!");
                     smolscale::spawn(server_session_loop(mux.clone())).detach();
                     mux
                 });
                 mux.add_pipe(pipe);
 
-                println!("Wsocks Server accepted new ws pipe...");
+                eprintln!("Wsocks Server accepted new ws pipe...");
             }
 
             #[allow(unreachable_code)]
@@ -654,7 +668,7 @@ async fn server(sopt: ServerOpt) -> anyhow::Result<()> {
 async fn server_session_loop(mux: Arc<Multiplex>) -> anyhow::Result<()> {
     loop {
         let mut relconn = mux.accept_conn().await?;
-        println!("session accepted new relconn");
+        eprintln!("session accepted new relconn");
         smolscale::spawn(async move {
             let req = Frame::recv(&mut relconn).await.unwrap().protocol;
             match req {
@@ -736,7 +750,7 @@ async fn tcp_forward_loop<RW: AsyncReadExt + AsyncWriteExt + Clone + Unpin>(
     };
 
     let up_fut = async move {
-        let mut buf = vec![0u8; 65535];
+        let mut buf = vec![0u8; 60000];
         let mut frame;
         loop {
             let size = conn.read(&mut buf).await?;
@@ -754,7 +768,7 @@ async fn tcp_forward_loop<RW: AsyncReadExt + AsyncWriteExt + Clone + Unpin>(
 
 async fn async_main() -> anyhow::Result<()> {
     let opt = Opt::parse();
-    println!("{:?}", opt);
+    eprintln!("{:?}", opt);
     match opt {
         Opt::Client(copt) => {
             client(copt).await
