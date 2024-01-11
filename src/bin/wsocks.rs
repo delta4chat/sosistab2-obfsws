@@ -200,7 +200,7 @@ impl From<Protocol> for Frame {
     fn from(protocol: Protocol) -> Self {
         Self {
             protocol,
-            padding: b".".repeat(fastrand::usize(1..=128))
+            padding: vec![0u8; fastrand::usize(1..=128)]
         }
     }
 }
@@ -226,7 +226,7 @@ impl Frame {
         relconn.read_exact(&mut len).await?;
 
         let len = u16::from_be_bytes(len) as usize;
-        let mut buf = b".".repeat(len);
+        let mut buf = vec![0u8; len];
         relconn.read_exact(&mut buf).await?;
 
         let this: Self = bincode::deserialize(&buf)?;
@@ -257,7 +257,7 @@ struct Etag {
 
 impl Etag {
     fn new(pk: MuxPublic) -> Self {
-        let mut random = b".".repeat(1024);
+        let mut random = vec![0u8; 1024];
         rand::thread_rng().fill_bytes(&mut random);
         Self {
             random,
@@ -602,7 +602,7 @@ async fn server(sopt: ServerOpt) -> anyhow::Result<()> {
                 log::warn!("Cannot read your long-term secret key file {key_file:?} (Error={err:?})... so generate new secret key, then save it into disk.");
                 let pre_sk = {
                     let buf_len = fastrand::usize(2048..=8192);
-                    let mut buf = b".".repeat(buf_len);
+                    let mut buf = vec![0u8; buf_len];
                     rand::thread_rng().fill_bytes(&mut buf);
                     buf
                 };
@@ -736,7 +736,7 @@ async fn tcp_forward_loop<RW: AsyncReadExt + AsyncWriteExt + Clone + Unpin>(
     };
 
     let up_fut = async move {
-        let mut buf = b".".repeat(65535);
+        let mut buf = vec![0u8; 65535];
         let mut frame;
         loop {
             let size = conn.read(&mut buf).await?;
