@@ -2,7 +2,7 @@
 name = "sosistab2-obfsws"
 description = "Websocket Pipe (pluggable-transport) support for sosistab2"
 authors = ["Delta4 <delta4chat@gmx.com>", "Your Name <you@example.com>"]
-version = "0.2.3"
+version = "0.2.4"
 edition = "2021"
 license = "MPL-2.0"
 repository="https://github.com/delta4chat/sosistab2-obfsws"
@@ -35,4 +35,13 @@ smol-timeout = "0.6.0"
 smolscale = "0.4.2"
 socksv5 = "0.3.1"
 sosistab2 = "0.10.19"
+
+[profile.release]
+panic = "unwind"
+opt-level = 3
+debug = "full"
+lto = true
+strip = "none"
+#codegen-units = 1
+overflow-checks = true
 
