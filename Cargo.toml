@@ -39,9 +39,10 @@ sosistab2 = "0.10.19"
 [profile.release]
 panic = "unwind"
 opt-level = 3
-debug = "full"
 lto = true
 strip = "none"
 #codegen-units = 1
 overflow-checks = true
+debug-assertions = true
+debug = "full"
 

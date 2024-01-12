@@ -92,9 +92,13 @@ enum Opt {
 
 /// a helper for convert from hex string to 256 bit key
 fn hex2key(h: &str) -> anyhow::Result<[u8; 32]> {
-    let mut k = [0u8; 32];
-    hex::decode_to_slice(h, &mut k)?;
-    Ok(k)
+    hex2bytes(h)
+}
+
+fn hex2bytes<const LENGTH: usize>(h: &str) -> anyhow::Result<[u8; LENGTH]> {
+    let mut b = [0u8; LENGTH];
+    hex::decode_to_slice(h, &mut b)?;
+    Ok(b)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
