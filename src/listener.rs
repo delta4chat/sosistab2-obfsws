@@ -19,13 +19,15 @@ pub struct ObfsWsListener {
     pipe_rx: Receiver<ObfsWsPipe>,
     _task: Task<anyhow::Result<()>>
 }
+
 impl ObfsWsListener {
     pub async fn bind(addr: impl ToSocketAddrs) -> anyhow::Result<Self> {
         let sock = TcpListener::bind(addr).await?;
         Ok(Self::from(sock))
     }
-
-    pub fn from(socket: TcpListener) -> Self {
+}
+impl From<TcpListener> for ObfsWsListener {
+    fn from(socket: TcpListener) -> Self {
         let (pipe_tx, pipe_rx) = smol::channel::bounded(1000);
         Self {
             pipe_rx,

@@ -37,7 +37,7 @@ impl ObfsWsPipe {
         let peer_metadata: String = peer_metadata.to_string();
 
         let peer_url: ws::Uri = peer_url.parse()?;
-        let mut host = peer_url.host().ok_or(anyhow::Error::msg("cannot parse Host:port pair in provided URL({peer_url:?})!"))?.to_string();
+        let mut host = peer_url.host().ok_or(anyhow::Error::msg("cannot parse host:port pair in provided URL({peer_url:?})!"))?.to_string();
         if let Some(port) = peer_url.port_u16() {
             host.push(':');
             host.push_str(&port.to_string());

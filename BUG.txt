@@ -1,0 +1,29 @@
+./target/release/examples/obfsws-test-1
+create server                                           create client
+accepted new incoming obfsws conn! "#cW+u76c9CENJiPaSdKoYtQ=="
+ObfsWsPipe { inner_reader: Mutex { data: SplitStream(BiLock { arc: Inner { state: 0x0, value: Some(UnsafeCell { .. }) } }) }, inner_send_tx: Sender { .. }, closed: false, peer_url: Some("ws://127.0.0.1:7070/abdgi"), peer_metadata: "cW+u76c9CENJiPaSdKoYtQ==" }
+client mux created!
+server accept new relconn
+opening relconn
+client relconn established
+NO.326: Ok(99.69%) Download speed: slice begin = 18149.842 KiB/s | slice last epoch = 18149.837 KiB/s
+NO.748: Ok(99.87%) Download speed: slice begin = 18.872 MiB/s | slice last epoch = 20.025 MiB/s
+NO.1150: Ok(99.91%) Download speed: slice begin = 19.382 MiB/s | slice last epoch = 20.407 MiB/s
+NO.1569: Ok(99.94%) Download speed: slice begin = 19.833 MiB/s | slice last epoch = 21.191 MiB/s
+NO.1964: Ok(99.95%) Download speed: slice begin = 19.831 MiB/s | slice last epoch = 19.827 MiB/s
+NO.2352: Ok(99.96%) Download speed: slice begin = 19.845 MiB/s | slice last epoch = 19.914 MiB/s
+NO.2763: Ok(99.96%) Download speed: slice begin = 19.966 MiB/s | slice last epoch = 20.695 MiB/s
+NO.3171: Ok(99.97%) Download speed: slice begin = 20.056 MiB/s | slice last epoch = 20.688 MiB/s
+NO.3581: Ok(99.97%) Download speed: slice begin = 20.107 MiB/s | slice last epoch = 20.511 MiB/s
+NO.3973: Ok(99.97%) Download speed: slice begin = 20.099 MiB/s | slice last epoch = 20.031 MiB/s
+NO.4135: Ok(99.98%) Download speed: slice begin = 18.515 MiB/s | slice last epoch = 8.049 MiB/s
+NO.4443: Ok(99.98%) Download speed: slice begin = 18.682 MiB/s | slice last epoch = 20.607 MiB/s
+NO.4489: Ok(99.96%) Download speed: slice begin = 17.289 MiB/s | slice last epoch = 3.041 MiB/s
+NO.4490: Ok(99.93%) Download speed: slice begin = 16.117 MiB/s | slice last epoch = 0.000 MiB/s
+NO.4491: Ok(99.91%) Download speed: slice begin = 15457.376 KiB/s | slice last epoch = 0.000 KiB/s
+
+*** NO.4492-NO.4984 [duplicate lines ignored] ***
+
+NO.4985: Ok(90.01%) Download speed: slice begin = 489493.576 byte/s | slice last epoch = 0.000 byte/s
+NO.4986: Ok(89.99%) Download speed: slice begin = 488535.276 byte/s | slice last epoch = 0.000 byte/s
+[2024-01-12T14:10:26Z ERROR obfsws_test_1] Ok rate too low
