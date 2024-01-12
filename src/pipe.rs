@@ -3,6 +3,8 @@ use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 
 use bytes::Bytes;
 
+use anyhow::Context;
+
 use async_trait::async_trait;
 use futures_util::{StreamExt, /*AsyncWriteExt, AsyncWrite,*/ sink::SinkExt};
 use futures_util::stream::{SplitStream, SplitSink};
@@ -35,7 +37,7 @@ impl ObfsWsPipe {
         let peer_metadata: String = peer_metadata.to_string();
 
         let peer_url: ws::Uri = peer_url.parse()?;
-        let mut host = peer_url.host().unwrap().to_string();
+        let mut host = peer_url.host().ok_or(anyhow::Error::msg("cannot parse Host:port pair in provided URL({peer_url:?})!"))?.to_string();
         if let Some(port) = peer_url.port_u16() {
             host.push(':');
             host.push_str(&port.to_string());
@@ -49,8 +51,7 @@ impl ObfsWsPipe {
             .header("Upgrade", "websocket")
             .header("Sec-Websocket-Version", "13")
             .header("Sec-Websocket-Key", &peer_metadata)
-            .body(())
-            .unwrap();
+            .body(())?;
         let (inner, resp) = ws::connect_async(req).await?;
         log::trace!("ws pipe connected: inner={inner:?} | resp={resp:?}");
         let mut this = Self::new(inner, &peer_metadata);
@@ -104,7 +105,7 @@ async fn send_loop(
         if result.is_err() {
             closed.store(true, Relaxed);
         }
-        result.unwrap();
+        result?;
     }
 }
 
@@ -112,7 +113,9 @@ async fn send_loop(
 impl sosistab2::Pipe for ObfsWsPipe {
     fn send(&self, msg: Bytes) {
         if self.is_closed() {
-            std::io::Result::<()>::Err(std::io::ErrorKind::BrokenPipe.into()).expect("Try send to a closed ObfsWsPipe!");
+            let err = std::io::Result::<()>::Err(std::io::ErrorKind::BrokenPipe.into()).context("Try send to a closed ObfsWsPipe!");
+            log::debug!("{err:?}");
+            return;
         }
 
         let msg_len = msg.len();

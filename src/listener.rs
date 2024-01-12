@@ -49,10 +49,11 @@ async fn pipe_accept_loop(
         smolscale::spawn(async move {
             let (md_tx, md_rx) = smol::channel::bounded(1);
 
-            let ws_conn = ws::accept_hdr_async(ws::ConnectStream::Plain(conn), pipe_get_metadata(md_tx)).await.unwrap();
-            let metadata = md_rx.recv().await.unwrap();
+            let ws_conn = ws::accept_hdr_async(ws::ConnectStream::Plain(conn), pipe_get_metadata(md_tx)).await?;
+            let metadata = md_rx.recv().await?;
             let pipe = ObfsWsPipe::new(ws_conn, &metadata);
-            pipe_tx.send(pipe).await.unwrap();
+            pipe_tx.send(pipe).await?;
+            Ok::<_, anyhow::Error>(())
         }).detach();
     }
 }

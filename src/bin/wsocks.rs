@@ -14,6 +14,7 @@ use sosistab2::{MuxSecret, MuxPublic};
 // traits
 use futures_util::{AsyncReadExt, AsyncWriteExt};
 use rand::{Rng, RngCore};
+use anyhow::Context;
 
 // concurrent lock
 use async_std::sync::Arc;
@@ -379,7 +380,7 @@ impl ToString for &Etag {
 
 async fn client(copt: ClientOpt) -> anyhow::Result<()> {
     let pubkey = MuxPublic::from_bytes(
-        hex2key(&copt.remote_public_key).expect("[hex::decode] cannot parse remote public key")
+        hex2key(&copt.remote_public_key).context("[hex::decode] cannot parse remote public key")?
     );
 
     // the helper that can generate a unique "session-id" for each request.
@@ -416,7 +417,7 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
             }
 
             #[allow(unreachable_code)]
-            anyhow::Ok(())
+            Ok::<_, anyhow::Error>(())
         }
     };
 
@@ -425,26 +426,30 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
         let mux = mux.clone();
         async move {
             loop {
-                let (req, conn, resp): (Protocol, TcpStream, Sender<(Result<u128, OfferError>, sosistab2::Stream)>) = req_rx.recv().await.unwrap();
+                let (req, conn, resp): (Protocol, TcpStream, Sender<(Result<u128, OfferError>, sosistab2::Stream)>) = req_rx.recv().await?;
                 log::trace!("local proxy server received new request: req={req:?} | conn={conn:?}");
                 let mux = mux.clone();
                 smolscale::spawn(async move {
-                    let mut relconn = mux.open_conn("").await.unwrap();
+                    let mut relconn = mux.open_conn("").await?;
 
                     // send req
-                    Frame::from(req).send(&mut relconn).await.unwrap();
+                    Frame::from(req).send(&mut relconn).await?;
 
                     // recv resp
-                    let res = Frame::recv(&mut relconn).await.unwrap().protocol;
+                    let res = Frame::recv(&mut relconn).await?.protocol;
 
                     match res {
                         Protocol::TcpOffer { id } => {
-                            resp.send((id, relconn)).await.unwrap();
+                            resp.send((id, relconn)).await?;
                         }
-                        _ => { panic!("receive a unexpected frame type from wsocks server, only TcpOffer expected."); }
+                        _ => { anyhow::bail!("receive a unexpected frame type from wsocks server, only TcpOffer expected."); }
                     }
+                    Ok::<_, anyhow::Error>(())
                 }).detach();
             }
+
+            #[allow(unreachable_code)]
+            Ok::<_, anyhow::Error>(())
         }
     };
 
@@ -455,17 +460,17 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
             let mut conn: TcpStream;
             let mut peer: SocketAddr;
             loop {
-                (conn, peer) = socksd.accept().await.unwrap();
+                (conn, peer) = socksd.accept().await?;
                 log::trace!("local socks listener accept raw TCP connection from {peer:?}");
                 let req_tx = req_tx.clone();
                 smolscale::spawn(async move {
                     let dst: String;
                     let port: u16;
 
-                    let version = socksv5::read_version(&conn).await.unwrap();
+                    let version = socksv5::read_version(&conn).await?;
                     match version {
                         SocksVersion::V4 => {
-                            let req = socksv5::v4::read_request_skip_version(&conn).await.unwrap();
+                            let req = socksv5::v4::read_request_skip_version(&conn).await?;
                             port = req.port;
 
                             dst = match req.host {
@@ -478,10 +483,10 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
                             };
                         }
                         SocksVersion::V5 => {
-                            let _ = socksv5::v5::read_handshake_skip_version(&conn).await.unwrap();
-                            socksv5::v5::write_auth_method(&conn, SocksV5AuthMethod::Noauth).await.unwrap();
+                            let _ = socksv5::v5::read_handshake_skip_version(&conn).await?;
+                            socksv5::v5::write_auth_method(&conn, SocksV5AuthMethod::Noauth).await?;
 
-                            let req = socksv5::v5::read_request(&conn).await.unwrap();
+                            let req = socksv5::v5::read_request(&conn).await?;
                             port = req.port;
 
                             dst = match req.host {
@@ -504,12 +509,12 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
                     };
 
                     let (resp_tx, resp_rx) = smol::channel::bounded(1);
-                    req_tx.send((req, conn.clone(), resp_tx)).await.unwrap();
+                    req_tx.send((req, conn.clone(), resp_tx)).await?;
 
-                    let (offer_id, relconn) = resp_rx.recv().await.unwrap();
+                    let (offer_id, relconn) = resp_rx.recv().await?;
                     match offer_id {
                         Ok(id) => {
-                            eprintln!("(Socks proxy) connected to remote {dst:?}:{port:?} ! ID={id:?}");
+                            log::debug!("(Socks proxy) connected to remote {dst:?}:{port:?} ! ID={id:?}");
                             match version {
                                 SocksVersion::V4 => {
                                     socksv5::v4::write_request_status(
@@ -517,7 +522,7 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
                                         SocksV4RequestStatus::Granted,
                                         [0, 1, 1, 1],
                                         port,
-                                    ).await.unwrap();
+                                    ).await?;
                                 },
                                 SocksVersion::V5 => {
                                     socksv5::v5::write_request_status(
@@ -525,12 +530,12 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
                                         SocksV5RequestStatus::Success,
                                         SocksV5Host::Domain(dst.as_bytes().to_vec()),
                                         port,
-                                    ).await.unwrap();
+                                    ).await?;
                                 }
                             }
 
                             // forward traffic...
-                            tcp_forward_loop(id, conn, relconn).await.unwrap();
+                            tcp_forward_loop(id, conn, relconn).await?;
                             /*smol::future::race(
                                 smol::io::copy(relconn.clone(), conn.clone()),
                                 smol::io::copy(conn, relconn)
@@ -550,7 +555,7 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
                                         err.into(),
                                         [0, 0, 0, 0],
                                         0,
-                                    ).await.unwrap();
+                                    ).await?;
                                 },
                                 SocksVersion::V5 => {
                                     socksv5::v5::write_request_status(
@@ -558,13 +563,17 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
                                         err.into(),
                                         SocksV5Host::Ipv4([0, 0, 0, 0]),
                                         0,
-                                    ).await.unwrap();
+                                    ).await?;
                                 },
                             }
                         }
                     }
+                    Ok::<_, anyhow::Error>(())
                 }).detach();
             }
+
+            #[allow(unreachable_code)]
+            Ok::<_, anyhow::Error>(())
         }
     };
 
@@ -575,21 +584,21 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
             let mut conn: TcpStream;
             let mut peer: SocketAddr;
             loop {
-                (conn, peer) = httpd.accept().await.unwrap();
+                (conn, peer) = httpd.accept().await?;
                 let req_tx = req_tx.clone();
                 smolscale::spawn(async move {
                     let dst: String;
                     let port: u16;
 
-                    eprintln!("http received request from {peer:?}");
-                    let (req, _) = async_h1::server::decode(conn.clone()).await.unwrap().unwrap();
+                    log::debug!("http received request from {peer:?}");
+                    let (req, _) = async_h1::server::decode(conn.clone()).await.unwrap().expect("cannot parse http req"); // `async_h1::StdError` incompatible `anyhow::Error`
                     let url = req.url();
-                    eprintln!("Debug incoming http request: url={:?} parsed={req:?}", url.to_string());
+                    log::debug!("incoming http request: url={:?} parsed={req:?}", url.to_string());
                     let method = req.method().to_string();
                     match &method[..] {
                         "CONNECT" => {
-                            dst = url.host_str().expect("cannot parse 'host' from http proxy request").to_string();
-                            port = url.port_or_known_default().expect("cannot parse 'port' from http proxy request");
+                            dst = url.host_str().context("cannot parse 'host' from http proxy request")?.to_string();
+                            port = url.port_or_known_default().context("cannot parse 'port' from http proxy request")?;
 
                             let req = Protocol::TcpConnect {
                                 dst: dst.clone(),
@@ -597,17 +606,17 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
                             };
 
                             let (resp_tx, resp_rx) = smol::channel::bounded(1);
-                            req_tx.send((req, conn.clone(), resp_tx)).await.unwrap();
+                            req_tx.send((req, conn.clone(), resp_tx)).await?;
 
-                            let (offer_id, relconn) = resp_rx.recv().await.unwrap();
+                            let (offer_id, relconn) = resp_rx.recv().await?;
                             match offer_id {
                                 Ok(id) => {
-                                    eprintln!("(HTTP proxy) connected to remote {dst:?}:{port:?} ! ID={id:?}");
+                                    log::debug!("(HTTP proxy) connected to remote {dst:?}:{port:?} ! ID={id:?}");
 
-                                    conn.write_all(b"HTTP/1.0 200 Connection established\r\n\r\n").await.unwrap();
+                                    conn.write_all(b"HTTP/1.0 200 Connection established\r\n\r\n").await?;
         
                                     // forward traffic...
-                                    tcp_forward_loop(id, conn, relconn).await.unwrap();
+                                    tcp_forward_loop(id, conn, relconn).await?;
                                     /*smol::future::race(
                                         smol::io::copy(relconn.clone(), conn.clone()),
                                         smol::io::copy(conn, relconn)
@@ -617,12 +626,16 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
                             }
                         },
                         _ => {
-                            conn.write_all(b"HTTP/1.0 400 unsupported non-CONNECT request\r\n\r\n").await.unwrap();
-                            conn.close().await.unwrap();
+                            conn.write_all(b"HTTP/1.0 400 unsupported non-CONNECT request\r\n\r\n").await?;
+                            conn.close().await?;
                         }
                     }
+                    Ok::<_, anyhow::Error>(())
                 }).detach();
             }
+
+            #[allow(unreachable_code)]
+            Ok::<_, anyhow::Error>(())
         }
     };
 
@@ -642,7 +655,7 @@ async fn server(sopt: ServerOpt) -> anyhow::Result<()> {
         // this is important for avoid infinity loop
         i += 1;
         if i >= 10 {
-            panic!("Cannot get long-term secret key of server!");
+            anyhow::bail!("Cannot get long-term secret key of server!");
         }
 
         match smol::fs::read(&key_file).await {
@@ -658,7 +671,7 @@ async fn server(sopt: ServerOpt) -> anyhow::Result<()> {
                     rand::thread_rng().fill_bytes(&mut buf);
                     buf
                 };
-                smol::fs::write(&key_file, pre_sk).await.expect("Cannot write new key to disk!?");
+                smol::fs::write(&key_file, pre_sk).await.context("Cannot write new key to disk!?")?;
             }
         }
     };
@@ -686,7 +699,7 @@ async fn server(sopt: ServerOpt) -> anyhow::Result<()> {
             loop {
                 let pipe: Arc<dyn Pipe> = wpl.accept_pipe().await?;
                 let hash: u64 = Etag::from(server_pk, pipe.peer_metadata())?;
-                eprintln!("geted client session: {hash}");
+                log::debug!("geted client session: {hash}");
 
                 let server_sk = server_sk.clone();
                 let mux = mux_sessions.entry(hash)
@@ -694,13 +707,13 @@ async fn server(sopt: ServerOpt) -> anyhow::Result<()> {
                     let mux = Arc::new(
                         Multiplex::new(server_sk, None)
                     );
-                    eprintln!("created new Multiplex!");
+                    log::debug!("created new Multiplex for session {hash} !");
                     smolscale::spawn(server_session_loop(mux.clone())).detach();
                     mux
                 });
                 mux.add_pipe(pipe);
 
-                eprintln!("Wsocks Server accepted new ws pipe...");
+                log::debug!("Wsocks Server accepted new ws pipe...");
             }
 
             #[allow(unreachable_code)]
@@ -708,14 +721,12 @@ async fn server(sopt: ServerOpt) -> anyhow::Result<()> {
         }
     };
 
-    wpl_fut.await?;
-
-    todo!()
+    wpl_fut.await
 }
 async fn server_session_loop(mux: Arc<Multiplex>) -> anyhow::Result<()> {
     loop {
         let mut relconn = mux.accept_conn().await?;
-        eprintln!("session accepted new relconn");
+        log::debug!("session accepted new relconn");
         smolscale::spawn(async move {
             let req = Frame::recv(&mut relconn).await.unwrap().protocol;
             match req {
