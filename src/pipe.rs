@@ -15,15 +15,16 @@ use ws::WS;
 use smol::channel::{Sender, Receiver};
 
 use async_std::sync::Arc;
-use async_lock::Mutex;
+//use async_lock::{Mutex, RwLock};
 
 //type Inner = async_dup::Arc<async_dup::Mutex<WS>>;
 #[derive(Debug, Clone)]
 pub struct ObfsWsPipe {
     //inner: Inner,
-    inner_reader: Arc<Mutex<SplitStream<WS>>>,
+    //inner_reader: Arc<RwLock<SplitStream<WS>>>,
     //inner_writer: SplitSink<WS, ws::Message>,
     inner_send_tx: Sender<Bytes>,
+    inner_recv_rx: Receiver<Bytes>,
 
     closed: Arc<AtomicBool>,
 
@@ -54,25 +55,33 @@ impl ObfsWsPipe {
             .body(())?;
         let (inner, resp) = ws::connect_async(req).await?;
         log::trace!("ws pipe connected: inner={inner:?} | resp={resp:?}");
-        let mut this = Self::new(inner, &peer_metadata);
+        let mut this = Self::new(inner, peer_metadata);
         this.peer_url = Some(peer_url.to_string());
         Ok(this)
     }
 
-    pub(crate) fn new(inner: WS, peer_metadata: &str) -> Self {
+    pub(crate) fn new(inner: WS, peer_metadata: impl ToString) -> Self {
         //let inner = async_dup::Mutex::new(inner);
         //let inner = async_dup::Arc::new(inner);
     
-        let (inner_send_tx, inner_send_rx) = smol::channel::bounded(1000);
+        let (inner_send_tx, inner_send_rx) = smol::channel::bounded(10000);
+        let (inner_recv_tx, inner_recv_rx) = smol::channel::bounded(10000);
         let (inner_writer, inner_reader) = inner.split();
         let closed = Arc::new(AtomicBool::new(false));
 
         // background task for sending pkts
         smolscale::spawn(
-            send_loop(
-                inner_send_rx,
-                inner_writer,
-                closed.clone()
+            smol::future::race(
+                send_loop(
+                    inner_send_rx,
+                    inner_writer,
+                    closed.clone()
+                ),
+                recv_loop(
+                    inner_recv_tx,
+                    inner_reader,
+                    closed.clone()
+                )
             )
         ).detach();
 
@@ -80,9 +89,10 @@ impl ObfsWsPipe {
             closed,
 
             //inner: inner.clone(),
-            inner_reader: Arc::new(Mutex::new(inner_reader)),
+            //inner_reader: Arc::new(RwLock::new(inner_reader)),
             //inner_writer,
             inner_send_tx,
+            inner_recv_rx,
             peer_url: None,
             peer_metadata: peer_metadata.to_string(),
         }
@@ -103,10 +113,40 @@ async fn send_loop(
 
         let result = inner_writer.send( ws::Message::binary(msg) ).await;
         if result.is_err() {
+            log::debug!("set closed atomic bool");
             closed.store(true, Relaxed);
         }
         result?;
     }
+}
+async fn recv_loop(
+    inner_recv_tx: Sender<Bytes>,
+    mut inner_reader: SplitStream<WS>,
+    closed: Arc<AtomicBool>,
+) -> anyhow::Result<()> {
+    loop {
+        let ret = inner_reader.next().await;
+        if let Some(ret) = ret {
+            if let Ok(ret) = ret {
+                match ret {
+                    ws::Message::Binary(msg) => {
+                        log::trace!("from ws stream recved (before 256 bytes) {:?}", if msg.len() < 256 { &msg } else { &msg[..256] });
+                        inner_recv_tx.send(msg.into()).await?;
+                    },
+
+                    _ => {
+                        log::warn!("Unexpected Websocket Message type received!!! {:?}", ret);
+                    }
+                }
+            }
+        } else {
+            log::debug!("set closed atomic bool");
+            closed.store(true, Relaxed);
+            break;
+        }
+    }
+
+    Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe).into())
 }
 
 #[async_trait]
@@ -124,7 +164,7 @@ impl sosistab2::Pipe for ObfsWsPipe {
             if ret.is_ok() {
                 log::trace!("sent {} bytes via ws: {:?}", msg_len, ret);
             } else {
-                log::warn!("unable to send {} bytes via ws: maybe `smol::channel::bounded` reach max size (1000) ? Error= {:?}", msg_len, ret);
+                log::warn!("unable to send {} bytes via ws: maybe `smol::channel::bounded` reach max size (10000) ? Error= {:?}", msg_len, ret);
             }
         } else {
             log::warn!("Websocket Message too big (len={})", msg_len);
@@ -132,24 +172,13 @@ impl sosistab2::Pipe for ObfsWsPipe {
     }
 
     async fn recv(&self) -> std::io::Result<Bytes> {
-        let ret = self.inner_reader.lock().await.next().await;
-        if let Some(ret) = ret {
-            if let Ok(ret) = ret {
-                match ret {
-                    ws::Message::Binary(msg) => {
-                        log::trace!("from ws stream recved (before 256 bytes) {:?}", if msg.len() < 256 { &msg } else { &msg[..256] });
-                        return Ok(msg.into());
-                    },
-
-                    _ => {
-                        log::warn!("Unexpected Websocket Message type received!!! {:?}", ret);
-                    }
-                }
+        match self.inner_recv_rx.recv().await {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                log::debug!("cannot recv from channel: {e:?}");
+                Err(std::io::ErrorKind::BrokenPipe.into())
             }
         }
-
-        self.closed.store(true, Relaxed);
-        Err(std::io::ErrorKind::BrokenPipe.into())
     }
 
     fn protocol(&self) -> &str {

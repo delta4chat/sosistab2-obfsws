@@ -18,7 +18,6 @@ async fn obfsws_test_2() {
 
             let mut c = server_mux.accept_conn().await.unwrap();
             println!("server accept new relconn");
-
             smolscale::spawn(async move {
                 /*
                 let mut buf = b".".repeat(65535);
@@ -26,8 +25,21 @@ async fn obfsws_test_2() {
                     c.read_exact(&mut buf).await.unwrap();
                     c.write_all(&buf).await.unwrap();
                 }*/
-                smol::io::copy(c.clone(), c).await.unwrap();
+                smol::future::race(
+                    async move {
+                        smol::io::copy(c.clone(), c).await.unwrap();
+                    },
+                    async move {
+                        smol::Timer::after(
+                            Duration::from_secs(5)
+                        ).await;
+                        panic!("end pipe");
+                    }
+                ).await;
             }).detach();
+
+            smol::Timer::after(Duration::from_secs(7)).await;
+            panic!("end loop");
         }
 
     };
@@ -36,7 +48,7 @@ async fn obfsws_test_2() {
         smol::Timer::after(Duration::from_secs(1)).await;
 
         println!("create client");
-        let client_pipe = pipe::ObfsWsPipe::connect("ws://127.0.0.1:7070/abdgi", "metadata").await.unwrap();
+        let client_pipe = pipe::ObfsWsPipe::connect("ws://127.0.0.1:7070/abdgi", "cW+u76c9CENJiPaSdKoYtQ==").await.unwrap();
         println!("{:?}", &client_pipe);
 
 
@@ -133,14 +145,14 @@ async fn obfsws_test_2() {
             loop {
                 // hang up a long time
                 let t = Duration::from_secs(
-                    30 + fastrand::u64(..10)
+                    1 + fastrand::u64(..1)
                     );
                 println!("hang up {:?}", &t);
                 smol::Timer::after(t).await;
 
                 //t = Instant::now();
                 conn.write_all(b"hello world\n").await.unwrap();
-                allow_send.recv().await;
+                //allow_send.recv().await;
                 //println!("{:?}", t.elapsed());
             }
         };
@@ -148,10 +160,13 @@ async fn obfsws_test_2() {
         smol::future::race(recv_fut, send_fut).await;
     };
 
+    smolscale::spawn(server_fut).detach();
+        client_fut.await;
+        /*
     smol::future::race(
         server_fut,
         client_fut
-    ).await;
+    ).await;*/
 }
 
 async fn async_main() {
