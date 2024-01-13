@@ -237,8 +237,8 @@ jobs:
           git switch master
           git reset --hard ${{github.sha}}
 
-      - name: Update apt and install Musl and needed libraries
-        run: sudo apt update && sudo apt -y install musl musl-tools && sudo apt -y install *openssl*
+      - name: Update apt and install Musl
+        run: sudo apt update && sudo apt -y install musl musl-tools
 
       - name: Rust add Musl target triple
         run: rustup target add x86_64-unknown-linux-musl
