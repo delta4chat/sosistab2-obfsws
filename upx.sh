@@ -5,6 +5,6 @@
 
 command $*
 status_code="$?"
-upx ./target/**/wsocks
+upx "$(find ./target/ -name wsocks -or -name wsocks.exe)"
 exit "$status_code"
 
