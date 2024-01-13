@@ -674,6 +674,16 @@ async fn server(sopt: ServerOpt) -> anyhow::Result<()> {
                     let mut buf = vec![0u8; buf_len];
                     rand::thread_rng().fill_bytes(&mut buf);
                     buf
+
+                    /*
+                    let mut buf: Vec<String> = vec![];
+                    for _ in 128..fastrand::usize(256..=512) {
+                        let seed: [u8; 32] = rand::thread_rng().gen();
+                        let mnemonic = bip39::Mnemonic::from_entropy(&seed)?;
+                        buf.push(mnemonic.to_string());
+                    }
+                    serde_json::json!(buf).to_string().as_bytes().to_vec()
+                    */
                 };
                 smol::fs::write(&key_file, pre_sk).await.context("Cannot write new key to disk!?")?;
             }
