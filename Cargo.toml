@@ -2,7 +2,7 @@
 name = "sosistab2-obfsws"
 description = "Websocket Pipe (pluggable-transport) support for sosistab2"
 authors = ["Delta4 <delta4chat@gmx.com>", "Your Name <you@example.com>"]
-version = "0.2.4"
+version = "0.2.5"
 edition = "2021"
 license = "MPL-2.0"
 repository="https://github.com/delta4chat/sosistab2-obfsws"
