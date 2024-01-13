@@ -5,6 +5,6 @@
 
 command $*
 status_code="$?"
-upx ./target/release/wsocks
+upx ./target/**/wsocks
 exit "$status_code"
 
