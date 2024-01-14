@@ -693,8 +693,7 @@ async fn server(sopt: ServerOpt) -> anyhow::Result<()> {
     let server_pk = server_sk.to_public();
 
     let info = serde_json::json!({
-        "name": "wsocks - web socks",
-        "version": env!("CARGO_PKG_VERSION"),
+        "env": env_info(),
         "public_key": hex::encode(server_pk.as_bytes()),
         "listen": sopt.listen.to_string(),
     });
@@ -849,6 +848,18 @@ async fn async_main() -> anyhow::Result<()> {
             server(sopt).await
         }
     }
+}
+
+fn env_info() -> serde_json::Value {
+    serde_json::json!({
+        "name": "wsocks - web socks",
+        "license": option_env!("CARGO_PKG_LICENSE"),
+        "repo": option_env!("CARGO_PKG_REPOSITORY"),
+        "out_dir": [ option_env!("OUT_DIR"), option_env!("CARGO_TARGET_TMPDIR") ],
+        "version": option_env!("CARGO_PKG_VERSION"),
+        "target": option_env!("CARGO_BUILD_TARGET"),
+        "rust": option_env!("CARGO_PKG_RUST_VERSION"),
+    })
 }
 
 fn main() -> anyhow::Result<()> {
