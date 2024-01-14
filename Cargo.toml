@@ -12,11 +12,11 @@ repository="https://github.com/delta4chat/sosistab2-obfsws"
 [target.'cfg(any(target_os="windows", target_os="macos"))'.dependencies]
 async-tungstenite = { version="0.24.0", features = [ "async-std-runtime", "async-native-tls" ] }
 
-[target.'cfg(any(target_os="linux"))'.dependencies]
+[target.'cfg(any(target_os="linux", target_os="android"))'.dependencies]
 async-tungstenite = { version="0.24.0", features = [ "async-std-runtime", "async-tls" ] }
 
-[target.'cfg(any(target_os="android", target_os="freebsd", target_os="dragonfly", target_os="openbsd", target_os="netbsd"))'.dependencies]
-async-tungstenite = { version="0.24.0", features = [ "async-std-runtime" ] }
+[target.'cfg(any(target_os="freebsd", target_os="dragonfly", target_os="openbsd", target_os="netbsd"))'.dependencies]
+async-tungstenite = { version="0.24.0", features = [ "async-std-runtime", "async-tls" ] }
 
 [dependencies]
 anyhow = "1.0.79"
