@@ -87,7 +87,8 @@ struct ServerOpt {
 #[derive(Clone, Debug, clap::Parser)]
 enum Opt {
     Client(ClientOpt),
-    Server(ServerOpt)
+    Server(ServerOpt),
+    Info,
 }
 
 /// a helper for convert from hex string to 256 bit key
@@ -847,18 +848,254 @@ async fn async_main() -> anyhow::Result<()> {
         Opt::Server(sopt) => {
             server(sopt).await
         }
+        Opt::Info => {
+            println!("{:#}", env_info());
+            Ok(())
+        }
     }
+}
+
+fn cfg_info() -> serde_json::Value {
+    /* cfg!(target_arch) */
+    let mut target_arch: Vec<&str> = vec![];
+    if cfg!(target_arch="x86") {
+        target_arch.push("x86");
+    }
+    if cfg!(target_arch="x86_64") {
+        target_arch.push("x86_64");
+    }
+    if cfg!(target_arch="mips") {
+        target_arch.push("mips");
+    }
+    if cfg!(target_arch="powerpc") {
+        target_arch.push("powerpc");
+    }
+    if cfg!(target_arch="powerpc64") {
+        target_arch.push("powerpc64");
+    }
+    if cfg!(target_arch="arm") {
+        target_arch.push("arm");
+    }
+    if cfg!(target_arch="aarch64") {
+        target_arch.push("aarch64");
+    }
+    let target_arch: String = target_arch.join(", ");
+
+    /* cfg!(target_feature) */
+    let mut target_feature: Vec<&str> = vec![];
+    if cfg!(target_feature="avx") {
+        target_feature.push("avx");
+    }
+    if cfg!(target_feature="avx2") {
+        target_feature.push("avx2");
+    }
+    if cfg!(target_feature="crt-static") {
+        target_feature.push("crt-static");
+    }
+    if cfg!(target_feature="rdrand") {
+        target_feature.push("rdrand");
+    }
+    if cfg!(target_feature="sse") {
+        target_feature.push("sse");
+    }
+    if cfg!(target_feature="sse2") {
+        target_feature.push("sse2");
+    }
+    if cfg!(target_feature="sse4.1") {
+        target_feature.push("sse4.1");
+    }
+    let target_feature: String = target_feature.join(", ");
+
+    /* cfg!(target_os) */
+    let mut target_os: Vec<&str> = vec![];
+    if cfg!(target_os="linux") {
+        target_os.push("linux");
+    }
+    if cfg!(target_os="windows") {
+        target_os.push("windows");
+    }
+    if cfg!(target_os="macos") {
+        target_os.push("macos");
+    }
+    if cfg!(target_os="android") {
+        target_os.push("android");
+    }
+    if cfg!(target_os="ios") {
+        target_os.push("ios");
+    }
+    if cfg!(target_os="freebsd") {
+        target_os.push("freebsd");
+    }
+    if cfg!(target_os="dragonfly") {
+        target_os.push("dragonfly");
+    }
+    if cfg!(target_os="openbsd") {
+        target_os.push("openbsd");
+    }
+    if cfg!(target_os="none") {
+        target_os.push("none");
+    }
+    let target_os: String = target_os.join(", ");
+
+    /* cfg!(target_family) */
+    let mut target_family: Vec<&str> = vec![];
+    if cfg!(target_family="unix") {
+        target_family.push("unix");
+    }
+    if cfg!(target_family="windows") {
+        target_family.push("windows");
+    }
+    if cfg!(target_family="wasm") {
+        target_family.push("wasm");
+    }
+    let target_family: String = target_family.join(", ");
+
+    /* cfg!(target_env) */
+    let mut target_env: Vec<&str> = vec![];
+    if cfg!(target_env="gnu") {
+        target_env.push("gnu");
+    }
+    if cfg!(target_env="musl") {
+        target_env.push("musl");
+    }
+    if cfg!(target_env="sgx") {
+        target_env.push("sgx");
+    }
+    if cfg!(target_env="msvc") {
+        target_env.push("msvc");
+    }
+    let target_env: String = target_env.join(", ");
+
+    /* cfg!(target_endian) */
+    let mut target_endian: Vec<&str> = vec![];
+    if cfg!(target_endian="little") {
+        target_endian.push("little");
+    }
+    if cfg!(target_endian="big") {
+        target_endian.push("big");
+    }
+    let target_endian: String = target_endian.join(", ");
+
+    /* cfg!(target_pointer_width) */
+    let mut target_pointer_width: Vec<&str> = vec![];
+    if cfg!(target_pointer_width="64") {
+        target_pointer_width.push("64");
+    }
+    if cfg!(target_pointer_width="32") {
+        target_pointer_width.push("32");
+    }
+    if cfg!(target_pointer_width="16") {
+        target_pointer_width.push("16");
+    }
+    let target_pointer_width: String = target_pointer_width.join(", ");
+
+    /* cfg!(target_vendor) */
+    let mut target_vendor: Vec<&str> = vec![];
+    if cfg!(target_vendor="pc") {
+        target_vendor.push("pc");
+    }
+    if cfg!(target_vendor="apple") {
+        target_vendor.push("apple");
+    }
+    if cfg!(target_vendor="fortanix") {
+        target_vendor.push("fortanix");
+    }
+    if cfg!(target_vendor="unknown") {
+        target_vendor.push("unknown");
+    }
+    let target_vendor: String = target_vendor.join(", ");
+
+    /* cfg!(target_has_atomic) */
+    let mut target_has_atomic: Vec<&str> = vec![];
+    if cfg!(target_has_atomic="8") {
+        target_has_atomic.push("8");
+    }
+    if cfg!(target_has_atomic="16") {
+        target_has_atomic.push("16");
+    }
+    if cfg!(target_has_atomic="32") {
+        target_has_atomic.push("32");
+    }
+    if cfg!(target_has_atomic="64") {
+        target_has_atomic.push("64");
+    }
+    if cfg!(target_has_atomic="128") {
+        target_has_atomic.push("128");
+    }
+    if cfg!(target_has_atomic="ptr") {
+        target_has_atomic.push("ptr");
+    }
+    let target_has_atomic: String = target_has_atomic.join(", ");
+
+    /* cfg!(panic) */
+    let mut panic: Vec<&str> = vec![];
+    if cfg!(panic="unwind") {
+        panic.push("unwind");
+    }
+    if cfg!(panic="abort") {
+        panic.push("abort");
+    }
+    let panic: String = panic.join(", ");
+
+    /* cfg!(test) */
+    let test: bool = if cfg!(test) { true } else { false };
+
+    /* cfg!(debug_assertions) */
+    let debug_assertions: bool = if cfg!(debug_assertions) { true } else { false };
+
+    /* cfg!(proc_macro) */
+    let proc_macro: bool = if cfg!(proc_macro) { true } else { false };
+
+    serde_json::json!({
+        "target_arch": target_arch,
+        "target_feature": target_feature,
+        "target_os": target_os,
+        "target_family": target_family,
+        "target_env": target_env,
+        "target_endian": target_endian,
+        "target_pointer_width": target_pointer_width,
+        "target_vendor": target_vendor,
+        "target_has_atomic": target_has_atomic,
+        "panic": panic,
+        "test": test,
+        "debug_assertions": debug_assertions,
+        "proc_macro": proc_macro,
+    })
+}
+
+fn build_info() -> serde_json::Value {
+    serde_json::json!({
+        "time": option_env!("VERGEN_BUILD_TIMESTAMP"),
+        "git" : {
+            "commit": option_env!("VERGEN_GIT_SHA"),
+            "branch": option_env!("VERGEN_GIT_BRANCH"),
+        },
+        "cargo": {
+            "opt-level": option_env!("VERGEN_CARGO_OPT_LEVEL"),
+            "features": option_env!("VERGEN_CARGO_FEATURES"),
+            "debug": option_env!("VERGEN_CARGO_DEBUG"),
+        },
+        "rustc": {
+            "llvm_version": option_env!("VERGEN_RUSTC_LLVM_VERSION"),
+
+            "rustc_version": option_env!("VERGEN_RUSTC_SEMVER"),
+            "rustc_channel": option_env!("VERGEN_RUSTC_CHANNEL"),
+            "rustc_git_commit": option_env!("VERGEN_RUSTC_COMMIT_HASH"),
+
+            "host_triple": option_env!("VERGEN_RUSTC_HOST_TRIPLE"),
+            "target_triple": option_env!("VERGEN_CARGO_TARGET_TRIPLE"),
+        },
+    })
 }
 
 fn env_info() -> serde_json::Value {
     serde_json::json!({
+        "build": build_info(),
         "name": "wsocks - web socks",
         "license": option_env!("CARGO_PKG_LICENSE"),
         "repo": option_env!("CARGO_PKG_REPOSITORY"),
-        "out_dir": [ option_env!("OUT_DIR"), option_env!("CARGO_TARGET_TMPDIR") ],
         "version": option_env!("CARGO_PKG_VERSION"),
-        "target": option_env!("CARGO_BUILD_TARGET"),
-        "rust": option_env!("CARGO_PKG_RUST_VERSION"),
+        "cfg": cfg_info(),
     })
 }
 

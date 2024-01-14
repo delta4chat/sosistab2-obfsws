@@ -46,6 +46,9 @@ socksv5 = "0.3.1"
 sosistab2 = "0.10.19"
 #sosistab2 = { git = "https://github.com/delta4chat/sosistab2" }
 
+[build-dependencies]
+vergen = { version = "8.2.8", features = ["build", "cargo", "git", "gitoxide", "rustc"] }
+
 [profile.dev]
 panic = "unwind"
 opt-level = 2
