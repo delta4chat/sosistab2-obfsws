@@ -15,6 +15,7 @@ use ws::WS;
 use smol::channel::{Sender, Receiver};
 
 use async_std::sync::Arc;
+use async_std::net::TcpStream;
 //use async_lock::{Mutex, RwLock};
 
 //type Inner = async_dup::Arc<async_dup::Mutex<WS>>;
@@ -47,18 +48,22 @@ impl ObfsWsPipe {
             ws::Request::builder()
             .method("GET")
             .uri(peer_url.clone())
-            .header("Host", host)
+            .header("Host", &host)
             .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0")
             .header("Connection", "Upgrade")
             .header("Upgrade", "websocket")
             .header("Sec-Websocket-Version", "13")
             .header("Sec-Websocket-Key", &peer_metadata)
             .body(())?;
-        let (inner, resp) =
-            ws::connect_async_with_config(
-                req,
-                Some(ws::CONFIG),
-            ).await?;
+
+        let socket = TcpStream::connect(host).await?;
+        socket.set_nodelay(true)?;
+        let (inner, resp) = ws::client_async_tls_with_connector_and_config(
+            req,
+            socket,
+            None,
+            Some(ws::CONFIG)
+        ).await?;
         log::trace!("ws pipe connected: inner={inner:?} | resp={resp:?}");
         let mut this = Self::new(inner, peer_metadata);
         this.peer_url = Some(peer_url.to_string());
@@ -69,8 +74,8 @@ impl ObfsWsPipe {
         //let inner = async_dup::Mutex::new(inner);
         //let inner = async_dup::Arc::new(inner);
     
-        let (inner_send_tx, inner_send_rx) = smol::channel::bounded(10000);
-        let (inner_recv_tx, inner_recv_rx) = smol::channel::bounded(10000);
+        let (inner_send_tx, inner_send_rx) = smol::channel::bounded(100000);
+        let (inner_recv_tx, inner_recv_rx) = smol::channel::bounded(100000);
         let (inner_writer, inner_reader) = inner.split();
         let closed = Arc::new(AtomicBool::new(false));
 
@@ -169,7 +174,7 @@ impl sosistab2::Pipe for ObfsWsPipe {
             if ret.is_ok() {
                 log::trace!("sent {} bytes via ws: {:?}", msg_len, ret);
             } else {
-                log::warn!("unable to send {} bytes via ws: maybe `smol::channel::bounded` reach max size (10000) ? Error= {:?}", msg_len, ret);
+                log::warn!("unable to send {} bytes via ws: maybe `smol::channel::bounded` reach max size (100000) ? Error= {:?}", msg_len, ret);
             }
         } else {
             log::warn!("Websocket Message too big (len={})", msg_len);

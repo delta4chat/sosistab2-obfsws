@@ -10,7 +10,8 @@ pub mod ws {
     pub use async_tungstenite::tungstenite::handshake::client::Request;
     pub use async_tungstenite::tungstenite::handshake::server::{Response, ErrorResponse, Callback};
     pub use async_tungstenite::async_std::{
-        connect_async_with_config,
+        //connect_async_with_config,
+        client_async_tls_with_connector_and_config,
         ConnectStream,
     };
     pub use async_tungstenite::tungstenite::protocol::{WebSocketConfig, Message};
@@ -41,5 +42,3 @@ pub mod ws {
 
 
 pub use sosistab2::{Pipe, PipeListener};
-
-
