@@ -21,7 +21,7 @@ use async_std::sync::Arc;
 /*use async_lock::Mutex;*/
 
 // smol
-use smol::channel::{Sender, /*Receiver*/};
+use smol::channel::{Sender, Receiver};
 
 // async TCP socket
 use async_std::net::{TcpStream, TcpListener};
@@ -45,7 +45,6 @@ use cryptoxide::chacha20::ChaCha20;
 use clap::Parser;
 
 #[derive(Clone, Debug, clap::Parser)]
-#[command(version)]
 struct ClientOpt {
     #[arg(long)]
     /// URL of wsocks server. e.g. wss://example.com/DestroyGFW
@@ -56,7 +55,7 @@ struct ClientOpt {
     /// a public key of wsocks server, encoded by hex format, usually 32 bytes (provides 256-bit security)
     remote_public_key: String,
 
-    #[arg(long, default_value="10")]
+    #[arg(long, default_value="2")]
     /// the max limit of opened websocket connection
     remote_pipes_max: u8,
 
@@ -85,6 +84,7 @@ struct ServerOpt {
 }
 
 #[derive(Clone, Debug, clap::Parser)]
+#[command(author, version, about, long_about)]
 enum Opt {
     Client(ClientOpt),
     Server(ServerOpt),
@@ -95,7 +95,6 @@ enum Opt {
 fn hex2key(h: &str) -> anyhow::Result<[u8; 32]> {
     hex2bytes(h)
 }
-
 fn hex2bytes<const LENGTH: usize>(h: &str) -> anyhow::Result<[u8; LENGTH]> {
     let mut b = [0u8; LENGTH];
     hex::decode_to_slice(h, &mut b)?;
@@ -115,6 +114,7 @@ enum NetworkError {
 
 impl Into<SocksV4RequestStatus> for NetworkError {
     fn into(self) -> SocksV4RequestStatus {
+        log::warn!("wsocks server return connecting error: {self:?}");
         SocksV4RequestStatus::Failed
     }
 }
@@ -164,16 +164,9 @@ impl From<std::io::Error> for NetworkError {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-enum SessionError {
-    SessionUnknown, // client sends TcpResume or TcpClose, but conn ID is not found.
-    SessionTimeout, // conn ID exists, but inactive a long time, so reachs the server timeout.
-    BrokenPipe, // proxied connection is closed by peer 
-}
-
-#[derive(Debug, Serialize, Deserialize)]
 enum OfferError {
     UnableConnect(NetworkError),
-    UnableResume(SessionError),
+    //UnableResume(SessionError),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -182,16 +175,6 @@ enum Protocol {
     TcpConnect {
         dst: String, // can be IP address or Domain name
         port: u16, // 0-65535
-    },
-
-    // client wants to "re-use" a exists TCP Connection
-    TcpResume {
-        id: u128,
-    },
-
-    // client wants to close a exists TCP connection
-    TcpClose {
-        id: u128,
     },
 
     // server offers the client request (one of TcpConnect, TcpResume, TcpClose).
@@ -388,6 +371,8 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
         hex2key(&copt.remote_public_key).context("[hex::decode] cannot parse remote public key")?
     );
 
+    println!("{:#}", env_info());
+
     // the helper that can generate a unique "session-id" for each request.
     let etag = Etag::new(pubkey);
 
@@ -519,7 +504,7 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
                     let (offer_id, relconn) = resp_rx.recv().await?;
                     match offer_id {
                         Ok(id) => {
-                            log::debug!("(Socks proxy) connected to remote {dst:?}:{port:?} ! ID={id:?}");
+                            log::info!("(Socks proxy) connected to remote {dst:?}:{port:?} ! ID={id:?}");
                             match version {
                                 SocksVersion::V4 => {
                                     socksv5::v4::write_request_status(
@@ -540,7 +525,7 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
                             }
 
                             // forward traffic...
-                            tcp_forward_loop(id, conn, relconn).await?;
+                            tcp_forward_loop(None, id, conn, relconn).await?;
                             /*smol::future::race(
                                 smol::io::copy(relconn.clone(), conn.clone()),
                                 smol::io::copy(conn, relconn)
@@ -549,9 +534,6 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
                         Err(err) => {
                             let err: NetworkError = match err {
                                 OfferError::UnableConnect(e) => e,
-                                _ => {
-                                    panic!("unexpected received non-UnableConnect ({err:?}) from server, because we does not attempt to TcpResume");
-                                }
                             };
                             match version {
                                 SocksVersion::V4 => {
@@ -595,10 +577,10 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
                     let dst: String;
                     let port: u16;
 
-                    log::debug!("http received request from {peer:?}");
+                    log::info!("http received request from {peer:?}");
                     let (req, _) = async_h1::server::decode(conn.clone()).await.unwrap().expect("cannot parse http req"); // `async_h1::StdError` incompatible `anyhow::Error`
                     let url = req.url();
-                    log::debug!("incoming http request: url={:?} parsed={req:?}", url.to_string());
+                    log::info!("incoming http request: url={:?} parsed={req:?}", url.to_string());
                     let method = req.method().to_string();
                     match &method[..] {
                         "CONNECT" => {
@@ -616,12 +598,12 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
                             let (offer_id, relconn) = resp_rx.recv().await?;
                             match offer_id {
                                 Ok(id) => {
-                                    log::debug!("(HTTP proxy) connected to remote {dst:?}:{port:?} ! ID={id:?}");
+                                    log::info!("(HTTP proxy) connected to remote {dst:?}:{port:?} ! ID={id:?}");
 
                                     conn.write_all(b"HTTP/1.0 200 Connection established\r\n\r\n").await?;
         
                                     // forward traffic...
-                                    tcp_forward_loop(id, conn, relconn).await?;
+                                    tcp_forward_loop(None, id, conn, relconn).await?;
                                     /*smol::future::race(
                                         smol::io::copy(relconn.clone(), conn.clone()),
                                         smol::io::copy(conn, relconn)
@@ -713,7 +695,7 @@ async fn server(sopt: ServerOpt) -> anyhow::Result<()> {
             loop {
                 let pipe: Arc<dyn Pipe> = wpl.accept_pipe().await?;
                 let hash: u64 = Etag::from(server_pk, pipe.peer_metadata())?;
-                log::debug!("geted client session: {hash}");
+                log::info!("geted client session: {hash}");
 
                 let server_sk = server_sk.clone();
                 let mux = mux_sessions.entry(hash)
@@ -721,13 +703,13 @@ async fn server(sopt: ServerOpt) -> anyhow::Result<()> {
                     let mux = Arc::new(
                         Multiplex::new(server_sk, None)
                     );
-                    log::debug!("created new Multiplex for session {hash} !");
-                    smolscale::spawn(server_session_loop(mux.clone())).detach();
+                    log::info!("created new Multiplex for session {hash} !");
+                    smolscale::spawn(server_session_loop(hash, mux.clone())).detach();
                     mux
                 });
                 mux.add_pipe(pipe);
 
-                log::debug!("Wsocks Server accepted new ws pipe...");
+                log::info!("Wsocks Server accepted new ws pipe (session: {hash})...");
             }
 
             #[allow(unreachable_code)]
@@ -737,10 +719,42 @@ async fn server(sopt: ServerOpt) -> anyhow::Result<()> {
 
     wpl_fut.await
 }
-async fn server_session_loop(mux: Arc<Multiplex>) -> anyhow::Result<()> {
+
+async fn server_session_loop(hash: u64, mux: Arc<Multiplex>) -> anyhow::Result<()> {
+    let (deadline_tx, deadline_rx) = smol::channel::bounded(1);
+
+    let pipemgr_fut = {
+        let mux = mux.clone();
+        async move {
+            let mut last_alive = Instant::now();
+            loop {
+                // only kept "alive" pipes (remove any closed ws pipe)
+                mux.retain(|p| { p.peer_addr().len() > 0 });
+
+                if mux.iter_pipes().collect::<Vec<_>>().len() > 0 {
+                    last_alive = Instant::now();
+                }
+
+                if last_alive.elapsed().as_secs_f64() > 100.0 {
+                    // notify this mux session dead.
+                    deadline_tx.send(()).await.unwrap();
+                    break;
+                }
+
+                smol::Timer::after(Duration::from_secs(1)).await;
+            }
+        }
+    };
+    smolscale::spawn(pipemgr_fut).detach();
+
     loop {
+        if deadline_rx.try_recv().is_ok() {
+            anyhow::bail!("session {hash:?} deadline reached");
+        }
+
         let mut relconn = mux.accept_conn().await?;
-        log::debug!("session accepted new relconn");
+        log::info!("session accepted new relconn");
+        let deadline_rx = deadline_rx.clone();
         smolscale::spawn(async move {
             let req = Frame::recv(&mut relconn).await.unwrap().protocol;
             match req {
@@ -764,7 +778,7 @@ async fn server_session_loop(mux: Arc<Multiplex>) -> anyhow::Result<()> {
                             };
                             Frame::from(offer).send(&mut relconn).await.unwrap();
 
-                            tcp_forward_loop(id, conn, relconn).await.unwrap();
+                            tcp_forward_loop(Some(deadline_rx), id, conn, relconn).await.unwrap();
                             /*
                             smol::future::race(
                                 smol::io::copy(relconn.clone(), conn.clone()),
@@ -785,9 +799,6 @@ async fn server_session_loop(mux: Arc<Multiplex>) -> anyhow::Result<()> {
                         }
                     }
                 },
-                Protocol::TcpResume{..} => { todo!() },
-                Protocol::TcpClose{..} => { todo!() },
-
             }
             Ok(())
         }).detach();
@@ -795,6 +806,7 @@ async fn server_session_loop(mux: Arc<Multiplex>) -> anyhow::Result<()> {
 }
 
 async fn tcp_forward_loop<RW: AsyncReadExt + AsyncWriteExt + Clone + Unpin>(
+    deadline_rx: Option<Receiver<()>>,
     offer_id: u128,
     mut conn: RW, // for compatible many variants of "smol::net::TcpStream", "async_std::net::TcpStream", "async_net::TcpStream", etc...
     mut relconn: sosistab2::Stream,
@@ -802,11 +814,17 @@ async fn tcp_forward_loop<RW: AsyncReadExt + AsyncWriteExt + Clone + Unpin>(
     let down_fut = {
         let mut relconn = relconn.clone();
         let mut conn = conn.clone();
+        let deadline_rx = deadline_rx.clone();
         async move {
             let mut frame;
             loop {
-                frame = Frame::recv(&mut relconn).await?;
+                if let Some(ref deadline_rx) = deadline_rx {
+                    if deadline_rx.try_recv().is_ok() {
+                        anyhow::bail!("conn {offer_id:?} deadline reached");
+                    }
+                }
 
+                frame = Frame::recv(&mut relconn).await?;
                 match frame.protocol {
                     Protocol::TcpData {
                         id, payload
@@ -825,6 +843,12 @@ async fn tcp_forward_loop<RW: AsyncReadExt + AsyncWriteExt + Clone + Unpin>(
         let mut buf = vec![0u8; 60000];
         let mut frame;
         loop {
+            if let Some(ref deadline_rx) = deadline_rx {
+                if deadline_rx.try_recv().is_ok() {
+                    anyhow::bail!("conn {offer_id:?} deadline reached");
+                }
+            }
+
             let size = conn.read(&mut buf).await?;
 
             frame = Frame::from(Protocol::TcpData {
