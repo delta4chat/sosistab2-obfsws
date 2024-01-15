@@ -54,7 +54,11 @@ impl ObfsWsPipe {
             .header("Sec-Websocket-Version", "13")
             .header("Sec-Websocket-Key", &peer_metadata)
             .body(())?;
-        let (inner, resp) = ws::connect_async(req).await?;
+        let (inner, resp) =
+            ws::connect_async_with_config(
+                req,
+                Some(ws::CONFIG),
+            ).await?;
         log::trace!("ws pipe connected: inner={inner:?} | resp={resp:?}");
         let mut this = Self::new(inner, peer_metadata);
         this.peer_url = Some(peer_url.to_string());

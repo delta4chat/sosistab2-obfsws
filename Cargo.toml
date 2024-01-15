@@ -52,20 +52,20 @@ vergen = { version = "8.2.8", features = ["build", "cargo", "git", "gitoxide", "
 [profile.dev]
 panic = "unwind"
 opt-level = 2
-lto = false
+lto = "off"
 strip = "none"
-#codegen-units = 1
+codegen-units = 1024
 overflow-checks = true
 debug-assertions = true
 debug = "full"
 
 [profile.release]
 panic = "unwind"
-opt-level = 3
+opt-level = 2
 lto = true
 strip = "none"
-#codegen-units = 1
+codegen-units = 1
 overflow-checks = true
-debug-assertions = true
-debug = "full"
+debug-assertions = false
+debug = "limited"
 
