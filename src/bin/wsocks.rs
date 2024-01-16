@@ -40,7 +40,8 @@ use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
 
 // CHACHA20 cipher
-use cryptoxide::chacha20::ChaCha20;
+use chacha20::ChaCha20Legacy;
+use chacha20::cipher::{KeyIvInit, StreamCipher};
 
 // command line arguments parse
 use clap::Parser;
@@ -299,7 +300,7 @@ impl Etag {
         let out = {
             // first we encrypt the hash result.
             let mut hash = hash.clone();
-            ChaCha20::new(self.pk_hash.as_bytes(), &nonce).process_mut(&mut hash);
+            ChaCha20Legacy::new(self.pk_hash.as_bytes().into(), (&nonce).into()).apply_keystream(&mut hash);
 
             // structs the buffer for store output
             let mut buf = Vec::new();
@@ -333,7 +334,7 @@ impl Etag {
         assert_eq!(hash.len(), 8);
 
         let pk = pk.as_bytes();
-        ChaCha20::new(client_etag_hash(pk).as_bytes(), &nonce).process_mut(&mut hash);
+        ChaCha20Legacy::new(client_etag_hash(pk).as_bytes().into(), nonce.into()).apply_keystream(&mut hash);
 
         // this hack is needed for convert from &[u8] to [u8; 8]
         // is there anyone can tell me a better way?
@@ -376,6 +377,7 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
 
     // the helper that can generate a unique "session-id" for each request.
     let etag = Etag::new(pubkey);
+    log::info!("client hash {:?}", etag.calc_hash());
 
     let max_conn = copt.remote_pipes_max as usize;
 
