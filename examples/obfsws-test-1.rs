@@ -75,6 +75,8 @@ async fn obfsws_test_1() {
 
             let mut ticks = 0u128;
             let mut recvs = 0u128;
+
+            let mut last=Instant::now();
             loop {
                 ticks += 1; // add for each iteration
 
@@ -95,6 +97,10 @@ async fn obfsws_test_1() {
 
                         if rate < 90.0 {
                             log::error!("Ok rate too low");
+                            break;
+                        }
+                        if last.elapsed().as_secs_f64() > 15.0 {
+                            log::error!("no bytes received with in 15 seconds");
                             break;
                         }
                     }
@@ -122,6 +128,7 @@ async fn obfsws_test_1() {
                 }
 
                 if let Some(ret) = conn2.read(&mut recv_buf).timeout(interval).await {
+                    last = Instant::now();
                     recvs += 1; // add on recv only
 
                     let size = ret.unwrap();

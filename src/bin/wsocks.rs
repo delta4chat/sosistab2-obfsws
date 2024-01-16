@@ -15,9 +15,10 @@ use sosistab2::{MuxSecret, MuxPublic};
 use futures_util::{AsyncReadExt, AsyncWriteExt};
 use rand::{Rng, RngCore};
 use anyhow::Context;
+use smol_timeout::TimeoutExt;
 
 // concurrent lock
-use async_std::sync::Arc;
+use async_std::sync::{Arc, Weak};
 /*use async_lock::Mutex;*/
 
 // smol
@@ -686,28 +687,44 @@ async fn server(sopt: ServerOpt) -> anyhow::Result<()> {
 
     // ws pipe listener - future
     let wpl_fut = {
-        let mut mux_sessions: HashMap< u64, Arc<Multiplex> > = HashMap::new();
+        let mut mux_sessions: HashMap< u64, Weak<Multiplex> > = HashMap::new();
 
         // ws pipe listener
         let wpl = ObfsWsListener::bind(listen).await?;
 
         async move {
             loop {
+                // remove all dead multiplex session
+                mux_sessions.retain(|k, v| {
+                    let v = v.strong_count();
+                    log::trace!("sosistab2 mux {k} referring count {v}");
+                    v > 0
+                });
+
                 let pipe: Arc<dyn Pipe> = wpl.accept_pipe().await?;
                 let hash: u64 = Etag::from(server_pk, pipe.peer_metadata())?;
                 log::info!("geted client session: {hash}");
 
                 let server_sk = server_sk.clone();
+
                 let mux = mux_sessions.entry(hash)
                 .or_insert_with(move || {
                     let mux = Arc::new(
                         Multiplex::new(server_sk, None)
                     );
                     log::info!("created new Multiplex for session {hash} !");
-                    smolscale::spawn(server_session_loop(hash, mux.clone())).detach();
-                    mux
+                    smolscale::spawn(
+                        server_session_loop(
+                            hash,
+                            mux.clone()
+                        )
+                    ).detach();
+
+                    Arc::downgrade(&mux)
                 });
-                mux.add_pipe(pipe);
+                if let Some(mux) = mux.upgrade() {
+                    mux.add_pipe(pipe);
+                }
 
                 log::info!("Wsocks Server accepted new ws pipe (session: {hash})...");
             }
@@ -729,14 +746,23 @@ async fn server_session_loop(hash: u64, mux: Arc<Multiplex>) -> anyhow::Result<(
             let mut last_alive = Instant::now();
             loop {
                 // only kept "alive" pipes (remove any closed ws pipe)
-                mux.retain(|p| { p.peer_addr().len() > 0 });
+                mux.retain(|p| {
+                    let l=p.peer_addr();
+                    log::trace!("peer_addr: {l}");
+                    l.len() > 0
+                });
 
-                if mux.iter_pipes().collect::<Vec<_>>().len() > 0 {
+                if {
+                    let a = mux.iter_pipes().collect::<Vec<_>>().len();
+                    log::trace!("iter_pipes_len: {a}");
+                    a
+                } > 0 {
                     last_alive = Instant::now();
                 }
 
                 if last_alive.elapsed().as_secs_f64() > 100.0 {
                     // notify this mux session dead.
+                    log::trace!("mux session {hash} dead");
                     deadline_tx.send(()).await.unwrap();
                     break;
                 }
@@ -749,11 +775,14 @@ async fn server_session_loop(hash: u64, mux: Arc<Multiplex>) -> anyhow::Result<(
 
     loop {
         if deadline_rx.try_recv().is_ok() {
-            anyhow::bail!("session {hash:?} deadline reached");
+            anyhow::bail!("session {hash} deadline reached");
         }
 
-        let mut relconn = mux.accept_conn().await?;
-        log::info!("session accepted new relconn");
+        let mut relconn = match mux.accept_conn().timeout(Duration::from_secs(5)).await {
+            Some(v) => { v? },
+            None => { continue; }
+        };
+        log::info!("session {hash} accepted new relconn");
         let deadline_rx = deadline_rx.clone();
         smolscale::spawn(async move {
             let req = Frame::recv(&mut relconn).await.unwrap().protocol;
