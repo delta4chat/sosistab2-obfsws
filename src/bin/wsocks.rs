@@ -114,23 +114,23 @@ enum NetworkError {
     Other(String)
 }
 
-impl Into<SocksV4RequestStatus> for NetworkError {
-    fn into(self) -> SocksV4RequestStatus {
-        log::warn!("wsocks server return connecting error: {self:?}");
+impl From<NetworkError> for SocksV4RequestStatus {
+    fn from(val: NetworkError) -> Self {
+        log::warn!("wsocks server return connecting error: {val:?}");
         SocksV4RequestStatus::Failed
     }
 }
-impl Into<SocksV5RequestStatus> for NetworkError {
-    fn into(self) -> SocksV5RequestStatus {
-        match self {
-            Self::ServerFailure => SocksV5RequestStatus::ServerFailure,
-            Self::ConnectionNotAllowed => SocksV5RequestStatus::ConnectionNotAllowed,
-            Self::NetworkUnreachable => SocksV5RequestStatus::NetworkUnreachable,
-            Self::HostUnreachable => SocksV5RequestStatus::HostUnreachable,
-            Self::ConnectionRefused => SocksV5RequestStatus::ConnectionRefused,
-            Self::TtlExpired => SocksV5RequestStatus::TtlExpired,
-            Self::Other(_) => {
-                log::warn!("wsocks server return custom error: {self:?}");
+impl From<NetworkError> for SocksV5RequestStatus {
+    fn from(val: NetworkError) -> Self {
+        match val {
+            NetworkError::ServerFailure => SocksV5RequestStatus::ServerFailure,
+            NetworkError::ConnectionNotAllowed => SocksV5RequestStatus::ConnectionNotAllowed,
+            NetworkError::NetworkUnreachable => SocksV5RequestStatus::NetworkUnreachable,
+            NetworkError::HostUnreachable => SocksV5RequestStatus::HostUnreachable,
+            NetworkError::ConnectionRefused => SocksV5RequestStatus::ConnectionRefused,
+            NetworkError::TtlExpired => SocksV5RequestStatus::TtlExpired,
+            NetworkError::Other(_) => {
+                log::warn!("wsocks server return custom error: {val:?}");
                 SocksV5RequestStatus::ServerFailure
             }
         }
@@ -295,31 +295,26 @@ impl Etag {
 
     fn generate(&self) -> String {
         let nonce: [u8; 8] = rand::thread_rng().gen();
-        let hash: [u8; 8] = self.calc_hash().to_be_bytes();
+        let mut hash: [u8; 8] = self.calc_hash().to_be_bytes();
 
-        let out = {
-            // first we encrypt the hash result.
-            let mut hash = hash.clone();
-            ChaCha20Legacy::new(self.pk_hash.as_bytes().into(), (&nonce).into()).apply_keystream(&mut hash);
+        // first we encrypt the hash result.
+        ChaCha20Legacy::new(self.pk_hash.as_bytes().into(), (&nonce).into()).apply_keystream(&mut hash);
 
-            // structs the buffer for store output
-            let mut buf = Vec::new();
+        // structs the buffer for store output
+        let mut out = Vec::new();
 
-            // first 8 bytes: random-generated nonce.
-            buf.extend(nonce);
+        // first 8 bytes: random-generated nonce.
+        out.extend(nonce);
 
-            // last 8 bytes: encrypted hash.
-            buf.extend(hash);
+        // last 8 bytes: encrypted hash.
+        out.extend(hash);
 
-            // now we get the "Sec-Websocket-Key"
-            buf
-        };
+        // now we get the "Sec-Websocket-Key".
         // make sure we generates a valid Websocket-Key
         assert_eq!(out.len(), 16);
 
         // encode as base64 and output.
-        let out = BASE64_STANDARD.encode(out);
-        out
+        BASE64_STANDARD.encode(out)
     }
 
     fn from(pk: MuxPublic, b64: &str) -> anyhow::Result<u64> {
@@ -340,9 +335,7 @@ impl Etag {
         // is there anyone can tell me a better way?
         let hash = {
             let mut h = [0u8; 8];
-            for i in 0..8 {
-                h[i] = hash[i];
-            }
+            h.copy_from_slice(&hash[..8]);
             u64::from_be_bytes(h)
         };
         Ok(hash)
@@ -638,7 +631,7 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
 
 async fn server(sopt: ServerOpt) -> anyhow::Result<()> {
     let key_file = sopt.key_file.clone();
-    let listen = sopt.listen.clone();
+    let listen = sopt.listen;
 
     let mut i = 0;
     let server_sk: MuxSecret = loop {
@@ -748,17 +741,9 @@ async fn server_session_loop(hash: u64, mux: Arc<Multiplex>) -> anyhow::Result<(
             let mut last_alive = Instant::now();
             loop {
                 // only kept "alive" pipes (remove any closed ws pipe)
-                mux.retain(|p| {
-                    let l=p.peer_addr();
-                    log::trace!("peer_addr: {l}");
-                    l.len() > 0
-                });
+                mux.retain(|p| { p.peer_addr().len() > 0 });
 
-                if {
-                    let a = mux.iter_pipes().collect::<Vec<_>>().len();
-                    log::trace!("iter_pipes_len: {a}");
-                    a
-                } > 0 {
+                if mux.iter_pipes().collect::<Vec<_>>().len() > 0 {
                     last_alive = Instant::now();
                 }
 
@@ -884,7 +869,7 @@ async fn tcp_forward_loop<RW: AsyncReadExt + AsyncWriteExt + Clone + Unpin>(
 
             frame = Frame::from(Protocol::TcpData {
                 id: offer_id,
-                payload: (&buf[..size]).to_vec(),
+                payload: buf[..size].to_vec(),
             });
             frame.send(&mut relconn).await?;
         }
@@ -1093,13 +1078,13 @@ fn cfg_info() -> serde_json::Value {
     let panic: String = panic.join(", ");
 
     /* cfg!(test) */
-    let test: bool = if cfg!(test) { true } else { false };
+    let test: bool = cfg!(test);
 
     /* cfg!(debug_assertions) */
-    let debug_assertions: bool = if cfg!(debug_assertions) { true } else { false };
+    let debug_assertions: bool = cfg!(debug_assertions);
 
     /* cfg!(proc_macro) */
-    let proc_macro: bool = if cfg!(proc_macro) { true } else { false };
+    let proc_macro: bool = cfg!(proc_macro);
 
     serde_json::json!({
         "target_arch": target_arch,

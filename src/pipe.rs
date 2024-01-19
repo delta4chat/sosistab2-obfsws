@@ -217,7 +217,7 @@ impl sosistab2::Pipe for ObfsWsPipe {
         }
 
         if let Some(url) = &self.peer_url {
-            s.push_str(&url);
+            s.push_str(url);
         } else {
             s.push_str(&self.peer_metadata);
         }
