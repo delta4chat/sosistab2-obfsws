@@ -115,13 +115,13 @@ enum NetworkError {
 }
 
 impl From<NetworkError> for SocksV4RequestStatus {
-    fn from(val: NetworkError) -> Self {
+    fn from(val: NetworkError) -> SocksV4RequestStatus {
         log::warn!("wsocks server return connecting error: {val:?}");
         SocksV4RequestStatus::Failed
     }
 }
 impl From<NetworkError> for SocksV5RequestStatus {
-    fn from(val: NetworkError) -> Self {
+    fn from(val: NetworkError) -> SocksV5RequestStatus {
         match val {
             NetworkError::ServerFailure => SocksV5RequestStatus::ServerFailure,
             NetworkError::ConnectionNotAllowed => SocksV5RequestStatus::ConnectionNotAllowed,
@@ -879,6 +879,7 @@ async fn tcp_forward_loop<RW: AsyncReadExt + AsyncWriteExt + Clone + Unpin>(
 }
 
 async fn async_main() -> anyhow::Result<()> {
+    smolscale::permanently_single_threaded();
     let opt = Opt::parse();
     eprintln!("{:?}", opt);
     match opt {

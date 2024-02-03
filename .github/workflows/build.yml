@@ -285,7 +285,7 @@ jobs:
 
       - uses: actions/upload-artifact@v3
         with:
-          name: wsocks.amd64-windows
+          name: wsocks.amd64-windows.exe
           path: target/release/wsocks.exe
 
       - name: Upload binary of amd64 windows
