@@ -94,7 +94,7 @@ impl ObfsWsPipe {
         let closed = Arc::new(AtomicBool::new(false));
 
         // background task for sending pkts
-        smolscale::spawn(
+        smolscale2::spawn(
             smol::future::race(
                 send_loop(
                     inner_send_rx,

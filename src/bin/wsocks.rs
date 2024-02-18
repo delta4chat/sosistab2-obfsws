@@ -415,7 +415,7 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
                 let (req, conn, resp): (Protocol, TcpStream, Sender<(Result<u128, OfferError>, sosistab2::Stream)>) = req_rx.recv().await?;
                 log::trace!("local proxy server received new request: req={req:?} | conn={conn:?}");
                 let mux = mux.clone();
-                smolscale::spawn(async move {
+                smolscale2::spawn(async move {
                     let mut relconn = mux.open_conn("").await?;
 
                     // send req
@@ -449,7 +449,7 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
                 (conn, peer) = socksd.accept().await?;
                 log::trace!("local socks listener accept raw TCP connection from {peer:?}");
                 let req_tx = req_tx.clone();
-                smolscale::spawn(async move {
+                smolscale2::spawn(async move {
                     let dst: String;
                     let port: u16;
 
@@ -569,7 +569,7 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
             loop {
                 (conn, peer) = httpd.accept().await?;
                 let req_tx = req_tx.clone();
-                smolscale::spawn(async move {
+                smolscale2::spawn(async move {
                     let dst: String;
                     let port: u16;
 
@@ -622,9 +622,9 @@ async fn client(copt: ClientOpt) -> anyhow::Result<()> {
         }
     };
 
-    mux.add_drop_friend(smolscale::spawn(socks_fut));
-    mux.add_drop_friend(smolscale::spawn(http_fut));
-    mux.add_drop_friend(smolscale::spawn(request_fut));
+    mux.add_drop_friend(smolscale2::spawn(socks_fut));
+    mux.add_drop_friend(smolscale2::spawn(http_fut));
+    mux.add_drop_friend(smolscale2::spawn(request_fut));
 
     pipemgr_fut.await
 }
@@ -708,7 +708,7 @@ async fn server(sopt: ServerOpt) -> anyhow::Result<()> {
                         Multiplex::new(server_sk, None)
                     );
                     log::info!("created new Multiplex for session {hash} !");
-                    smolscale::spawn(
+                    smolscale2::spawn(
                         server_session_loop(
                             hash,
                             mux.clone()
@@ -758,7 +758,7 @@ async fn server_session_loop(hash: u64, mux: Arc<Multiplex>) -> anyhow::Result<(
             }
         }
     };
-    smolscale::spawn(pipemgr_fut).detach();
+    smolscale2::spawn(pipemgr_fut).detach();
 
     loop {
         if deadline_rx.try_recv().is_ok() {
@@ -771,7 +771,7 @@ async fn server_session_loop(hash: u64, mux: Arc<Multiplex>) -> anyhow::Result<(
         };
         log::info!("session {hash} accepted new relconn");
         let deadline_rx = deadline_rx.clone();
-        smolscale::spawn(async move {
+        smolscale2::spawn(async move {
             let req = Frame::recv(&mut relconn).await.unwrap().protocol;
             match req {
                 Protocol::TcpData{..} => {
@@ -879,7 +879,6 @@ async fn tcp_forward_loop<RW: AsyncReadExt + AsyncWriteExt + Clone + Unpin>(
 }
 
 async fn async_main() -> anyhow::Result<()> {
-    smolscale::permanently_single_threaded();
     let opt = Opt::parse();
     eprintln!("{:?}", opt);
     match opt {

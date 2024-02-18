@@ -31,7 +31,7 @@ impl From<TcpListener> for ObfsWsListener {
         let (pipe_tx, pipe_rx) = smol::channel::bounded(1000);
         Self {
             pipe_rx,
-            _task: smolscale::spawn(pipe_accept_loop(pipe_tx, socket))
+            _task: smolscale2::spawn(pipe_accept_loop(pipe_tx, socket))
         }
     }
 }
@@ -48,7 +48,7 @@ async fn pipe_accept_loop(
         log::trace!("ws pipe listener accepted raw TCP connection from {addr:?}");
 
         let pipe_tx = pipe_tx.clone();
-        smolscale::spawn(async move {
+        smolscale2::spawn(async move {
             let (md_tx, md_rx) = smol::channel::bounded(1);
             conn.set_nodelay(true)?;
 

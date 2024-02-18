@@ -2,7 +2,7 @@
 name = "sosistab2-obfsws"
 description = "Websocket Pipe (pluggable-transport) support for sosistab2"
 authors = ["Delta4 <delta4chat@gmx.com>", "Your Name <you@example.com>"]
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 license = "MPL-2.0"
 repository="https://github.com/delta4chat/sosistab2-obfsws"
@@ -53,21 +53,21 @@ vergen = { version = "8.2.8", features = ["build", "cargo", "git", "gitoxide", "
 panic = "unwind"
 opt-level = 2
 lto = "off"
-strip = "none"
-codegen-units = 1024
+#strip = "none"
+codegen-units = 256
 overflow-checks = true
 debug-assertions = true
-debug = "full"
-incremental = false
+debug = "limited"
+incremental = true
 
 [profile.release]
 panic = "unwind"
-opt-level = 2
+opt-level = 3
 lto = true
-strip = "none"
+strip = true
 codegen-units = 1
 overflow-checks = true
 debug-assertions = false
-debug = "limited"
+debug = 1
 incremental = false
 
