@@ -1,17 +1,18 @@
+use core::pin::Pin;
+use core::task::Poll;
+
 /*use std::net::SocketAddr;*/
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 
 use bytes::Bytes;
 
-use anyhow::Context;
-
-use async_trait::async_trait;
-use futures_util::{StreamExt, /*AsyncWriteExt, AsyncWrite,*/ sink::SinkExt};
+use futures_util::{/*StreamExt, AsyncWriteExt, AsyncWrite,*/ sink::SinkExt};
 use futures_util::stream::{SplitStream, SplitSink};
 
-use crate::ws;
+use crate::*;
 use ws::WS;
 
+use smol::prelude::*;
 use smol::channel::{Sender, Receiver};
 
 use async_std::sync::Arc;
@@ -20,6 +21,7 @@ use async_std::net::TcpStream;
 
 //type Inner = async_dup::Arc<async_dup::Mutex<WS>>;
 #[derive(Debug, Clone)]
+#[pin_project]
 pub struct ObfsWsPipe {
     //inner: Inner,
     //inner_reader: Arc<RwLock<SplitStream<WS>>>,
@@ -27,10 +29,13 @@ pub struct ObfsWsPipe {
     inner_send_tx: Sender<Bytes>,
     inner_recv_rx: Receiver<Bytes>,
 
+    #[pin]
+    recv_buf: Vec<u8>,
+
+    #[pin]
     closed: Arc<AtomicBool>,
 
-    peer_url: Option<String>,
-    peer_metadata: String,
+    peer_url: String,
 }
 
 impl ObfsWsPipe {
@@ -79,18 +84,19 @@ impl ObfsWsPipe {
             Some(ws::CONFIG)
         ).await?;
         log::trace!("ws pipe connected: inner={inner:?} | resp={resp:?}");
-        let mut this = Self::new(inner, peer_metadata);
-        this.peer_url = Some(peer_url.to_string());
-        Ok(this)
+        Ok(Self::new(inner, peer_url, peer_metadata))
     }
 
-    pub(crate) fn new(inner: WS, peer_metadata: impl ToString) -> Self {
+    pub(crate) fn new(inner: WS, peer_url: impl ToString, peer_metadata: impl ToString) -> Self {
         //let inner = async_dup::Mutex::new(inner);
         //let inner = async_dup::Arc::new(inner);
     
         let (inner_send_tx, inner_send_rx) = smol::channel::bounded(100000);
         let (inner_recv_tx, inner_recv_rx) = smol::channel::bounded(100000);
+
+        use futures_util::StreamExt;
         let (inner_writer, inner_reader) = inner.split();
+
         let closed = Arc::new(AtomicBool::new(false));
 
         // background task for sending pkts
@@ -109,16 +115,23 @@ impl ObfsWsPipe {
             )
         ).detach();
 
+        let mut peer_url = peer_url.to_string();
+        peer_url.push('#');
+        peer_url.extend(peer_metadata.to_string().chars());
+
         Self {
             closed,
 
             //inner: inner.clone(),
             //inner_reader: Arc::new(RwLock::new(inner_reader)),
             //inner_writer,
+
             inner_send_tx,
             inner_recv_rx,
-            peer_url: None,
-            peer_metadata: peer_metadata.to_string(),
+
+            recv_buf: Vec::new(),
+
+            peer_url,
         }
     }
 
@@ -131,24 +144,27 @@ async fn send_loop(
     mut inner_writer: SplitSink<WS, ws::Message>,
     closed: Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
-    loop {
+    while ! closed.load(Relaxed) {
         let msg: Bytes = inner_send_rx.recv().await?;
-        log::trace!("ws(plain) sending new message: {:?}", &msg);
+        log::trace!("websocket sending new message: {:?}", &msg);
 
         let result = inner_writer.send( ws::Message::binary(msg) ).await;
         if result.is_err() {
             log::debug!("set closed atomic bool");
             closed.store(true, Relaxed);
+            break;
         }
         result?;
     }
+
+    Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe).into())
 }
 async fn recv_loop(
     inner_recv_tx: Sender<Bytes>,
     mut inner_reader: SplitStream<WS>,
     closed: Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
-    loop {
+    while ! closed.load(Relaxed) {
         let ret = inner_reader.next().await;
         if let Some(ret) = ret {
             if let Ok(ret) = ret {
@@ -173,60 +189,116 @@ async fn recv_loop(
     Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe).into())
 }
 
-#[async_trait]
-impl sosistab2::Pipe for ObfsWsPipe {
-    fn send(&self, msg: Bytes) {
-        if self.is_closed() {
-            let err = std::io::Result::<()>::Err(std::io::ErrorKind::BrokenPipe.into()).context("Try send to a closed ObfsWsPipe!");
-            log::debug!("{err:?}");
-            return;
+impl AsyncWrite for ObfsWsPipe {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _ctx: &mut core::task::Context<'_>,
+        msg: &[u8]
+    ) -> Poll<Result<usize, std::io::Error>> {
+        let this = self.project();
+        if this.closed.load(Relaxed) {
+            return Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()));
         }
 
         let msg_len = msg.len();
-        if msg_len < 65536 {
-            let ret = self.inner_send_tx.try_send(msg);
-            if ret.is_ok() {
-                log::trace!("sent {} bytes via ws: {:?}", msg_len, ret);
+        let ret = this.inner_send_tx.try_send(msg.to_vec().into());
+        if ret.is_ok() {
+            log::trace!("sent {} bytes via ws: {:?}", msg_len, ret);
+        } else {
+            log::warn!("unable to send {} bytes via ws: maybe `smol::channel::bounded` reach max size (100000) ? Error= {:?}", msg_len, ret);
+        }
+
+        Poll::Ready(Ok(msg_len))
+    }
+
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        _ctx: &mut core::task::Context<'_>
+    ) -> Poll<Result<(), std::io::Error>> {
+        let this = self.project();
+        Poll::Ready(
+            if this.closed.load(Relaxed) {
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe).into())
             } else {
-                log::warn!("unable to send {} bytes via ws: maybe `smol::channel::bounded` reach max size (100000) ? Error= {:?}", msg_len, ret);
+                Ok(())
             }
+        )
+    }
+
+    fn poll_close(
+        self: Pin<&mut Self>,
+        _ctx: &mut std::task::Context<'_>
+    ) -> Poll<Result<(), std::io::Error>> {
+        let this = self.project();
+        this.closed.store(true, Relaxed);
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl AsyncRead for ObfsWsPipe {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _ctx: &mut core::task::Context<'_>,
+        buf: &mut [u8]
+    ) -> Poll<Result<usize, std::io::Error>> {
+        let mut this = self.project();
+
+        let buf_len = buf.len();
+        let mut buf_pos = 0;
+
+        {
+            let recv_buf_len = this.recv_buf.len();
+            if recv_buf_len > 0 {
+                let buf_remaining = buf_len - buf_pos;
+                if recv_buf_len > buf_remaining {
+                    buf.copy_from_slice(&this.recv_buf[..buf_len]);
+                    *this.recv_buf = this.recv_buf[buf_len..].to_vec();
+                    return Poll::Ready(Ok(buf_len));
+                } else {
+                    buf[..recv_buf_len].copy_from_slice(&this.recv_buf);
+                    this.recv_buf.clear();
+
+                    buf_pos += recv_buf_len;
+                }
+            }
+        }
+
+        let buf2 =
+            match this.inner_recv_rx.try_recv() {
+                Ok(v) => v,
+                _ => {
+                    return Poll::Pending;
+                }
+            };
+        let buf2_len = buf2.len();
+
+        let buf_remaining = buf_len - buf_pos;
+        if buf2_len > buf_remaining {
+            buf[buf_pos..].copy_from_slice(&buf2[..buf_remaining]);
+            this.recv_buf.extend(&buf2[buf_remaining..]);
+
+            buf_pos += buf_remaining;
         } else {
-            log::warn!("Websocket Message too big (len={})", msg_len);
-        }
-    }
+            buf[buf_pos..buf_pos+buf2_len].copy_from_slice(&buf2);
 
-    async fn recv(&self) -> std::io::Result<Bytes> {
-        match self.inner_recv_rx.recv().await {
-            Ok(v) => Ok(v),
-            Err(e) => {
-                log::debug!("cannot recv from channel: {e:?}");
-                Err(std::io::ErrorKind::BrokenPipe.into())
-            }
+            buf_pos += buf2_len;
         }
-    }
 
+        Poll::Ready(Ok(buf_pos))
+    }
+}
+
+impl Pipe for ObfsWsPipe {
     fn protocol(&self) -> &str {
-        "obfsws-1"
+        "sosistab3-obfsws"
     }
 
-    fn peer_addr(&self) -> String {
-        let mut s = "#".to_string();
+    fn remote_addr(&self) -> Option<&str> {
         if self.is_closed() {
-            s.clear();
-            return s;
+            return None;
         }
 
-        if let Some(url) = &self.peer_url {
-            s.push_str(url);
-        } else {
-            s.push_str(&self.peer_metadata);
-        }
-
-        s
-    }
-
-    fn peer_metadata(&self) -> &str {
-        &self.peer_metadata
+        Some(&self.peer_url)
     }
 }
 

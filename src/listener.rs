@@ -4,13 +4,11 @@ use crate::pipe::ObfsWsPipe;
 use smol::Task;
 use smol::channel::{Sender, Receiver};
 use async_std::net::{TcpStream, TcpListener};
-use async_trait::async_trait;
 
 use std::net::SocketAddr;
 use async_std::net::ToSocketAddrs;
-use std::sync::Arc;
 
-use sosistab2::{Pipe, PipeListener};
+use crate::*;
 
 use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
@@ -59,7 +57,7 @@ async fn pipe_accept_loop(
                     Some(ws::CONFIG),
                 ).await?;
             let metadata = md_rx.recv().await?;
-            let pipe = ObfsWsPipe::new(ws_conn, &metadata);
+            let pipe = ObfsWsPipe::new(ws_conn, "", &metadata);
             pipe_tx.send(pipe).await?;
             Ok::<_, anyhow::Error>(())
         }).detach();
@@ -89,11 +87,12 @@ fn pipe_get_metadata(md_tx: Sender<String>) -> impl ws::Callback {
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl PipeListener for ObfsWsListener {
-    async fn accept_pipe(&self) -> std::io::Result<Arc<dyn Pipe>> {
-        Ok(Arc::new(self.pipe_rx.recv().await.map_err(|e| {
+    type P = ObfsWsPipe;
+    async fn accept(&mut self) -> std::io::Result<Self::P> {
+        Ok(self.pipe_rx.recv().await.map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::BrokenPipe, e)
-        })?))
+        })?)
     }
 }
